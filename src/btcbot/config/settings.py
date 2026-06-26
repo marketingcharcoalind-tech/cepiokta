@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     chainlink_btcusd_source: str = ""
     chainlink_feed_type: str = "data_feed"
     chainlink_max_staleness_sec: int = 120
+    ws_app_ping_seconds: int = 10
+    ws_stale_seconds: int = 30
 
     # --- strategy params (lihat docs/05) ---
     t_entry_sec: int = 20
@@ -178,6 +180,8 @@ class Settings(BaseSettings):
         "max_orders_per_min",
         "stale_ms",
         "chainlink_max_staleness_sec",
+        "ws_app_ping_seconds",
+        "ws_stale_seconds",
     )
     @classmethod
     def _check_positive_int(cls, v: int, info: object) -> int:

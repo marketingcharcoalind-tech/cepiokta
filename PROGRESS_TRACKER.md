@@ -126,7 +126,8 @@ Fase 4 [          ] 0/3     G4: belum
 ## ⛔ Blockers / Risiko Aktif
 | # | Deskripsi | Sejak | Dampak | Rencana | Status |
 |---|-----------|-------|--------|---------|--------|
-| B1 | Endpoint CLOB V2 (REST/WSS) & skema pesan belum diverifikasi | 2026-06-25 | blokir Fase 3 (live) | cek docs resmi Polymarket (docs/04 §4.8) | 🟦 |
+| B1 | CLOB **REST** V2 (order/signing) belum diverifikasi | 2026-06-25 | blokir Fase 3 (live) | cek docs resmi Polymarket (docs/04 §4.8) | 🟦 |
+| B1-ws | CLOB **WS market** parser + keepalive — RESOLVED | 2026-06-26 | — | path `/ws/market`; parse LIST snapshot + `price_change`; keepalive: ping_interval=None + heartbeat "PING" 10s + stale 30s reconnect | ✅ |
 | B2b | Adapter Chainlink **Data Streams** BTC/USD (akurasi harga akhir-window) | 2026-06-25 | akurasi resolusi/edge; sumber resolusi asli market | bangun di Fase 1 (lihat task lanjutan) | 🟦 |
 | F1-fee | Reverse-engineer formula `crypto_fees_v2` → masukkan ke net_edge | 2026-06-25 | market berbiaya; edge harus net setelah fee | Fase 1 (signal/sizing) | 🟦 |
 | B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity | ✅ |
@@ -139,6 +140,8 @@ Fase 4 [          ] 0/3     G4: belum
 | 2026-06-25 | Market up/down 5m/15m **BERBIAYA**: `feesEnabled=true`, `feeType=crypto_fees_v2`, `feeSchedule{exponent,rate,takerOnly,rebateRate}` di-parse ke model | net_edge wajib memperhitungkan fee (Fase 1) | — |
 | 2026-06-25 | Resolusi market via **Chainlink Data Streams** (`resolutionSource`), bukan Data Feeds | basis-risk: sumber harga akhir-window harus = sumber resolusi (B2b) | — |
 | 2026-06-25 | `outcomePrices` Gamma **STALE** untuk market cepat → tidak dipakai sbg harga | harga live dari order book CLOB | — |
+| 2026-06-26 | WS market: book snapshot = JSON **array** (per token); `price_change` = dict (`price_changes[]`, BUY→bid/SELL→ask, size 0 hapus). Endpoint `/ws/market`. Maintain BookState per asset; best_bid=max(bids), best_ask=min(asks) | fix crash `.get()` pada list; harga live akurat dari order book | — |
+| 2026-06-26 | WS keepalive: server tak balas ping protokol → `ping_interval=None`/`ping_timeout=None` (matikan keepalive library) + heartbeat "PING" aplikasi tiap 10s (task terpisah) + stale 30s → reconnect | fix `1011 keepalive ping timeout` (mati ~45s meski data mengalir); konfig `WS_APP_PING_SECONDS`/`WS_STALE_SECONDS` | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)

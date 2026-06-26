@@ -1,27 +1,29 @@
 # Test fixtures
 
+Semua fixture di sini adalah **capture LIVE asli** dari Polymarket (VPS
+jaringan-bersih) dan menjadi snapshot schema untuk mengunci regresi.
+
 ## `gamma_updown_live_fixture.json`
 
-Sample respons Gamma `/markets` (array market) untuk **snapshot schema** test
-parser `adapters/gamma.py`. Berisi 4 market:
+Respons asli Gamma `/markets` (banyak market up/down lintas aset & timeframe,
+mis. `btc-updown-5m-1782478200`, `btc-updown-15m-1782477900`, ETH/SOL/XRP/...).
+Dipakai oleh `tests/adapters/test_gamma.py`.
 
-1. **btc-updown-5m**, OPEN, window 11:55→12:00 (in-window/next-round test).
-2. **btc-updown-5m** (epoch +300), OPEN, window 12:00→12:05.
-3. **eth-updown-15m**, OPEN (uji filter asset/timeframe).
-4. **Yes/No long-dated** (`will-bitcoin-reach-200k-2026`) — ditolak (bukan slug up/down).
-
-Karakteristik penting yang diuji (temuan data live, diverifikasi VPS):
-- Identifikasi via **slug** regex `^(asset)-updown-(5m|15m)-(epoch)$`, bukan teks judul.
+Karakteristik yang diuji:
+- Identifikasi via **slug** `^(asset)-updown-(5m|15m)-(epoch)$` (bukan teks judul).
 - `epoch` = waktu resolusi = `endDate` = `window_end`; sanity kelipatan 300/900.
-- `window_start` dari `eventStartTime` — **bukan** `startDate` (tanggal listing
-  ~24 jam sebelumnya; `startDate` sengaja diisi 25 Jun untuk membuktikan tidak dipakai).
-- `clobTokenIds` sejajar index dengan `outcomes` (Up/Down tidak tertukar).
-- `feeSchedule {exponent, rate, takerOnly, rebateRate}`, `feesEnabled`, `feeType`.
+- `window_start` dari `eventStartTime` (mis. 12:50) — **bukan** `startDate`
+  (tanggal listing, mis. 2026-06-25).
+- `clobTokenIds` sejajar index dengan `outcomes` → Up/Down tidak tertukar.
+- `feeSchedule {exponent, rate, takerOnly, rebateRate}` (`crypto_fees_v2`).
 - `resolutionSource` = Chainlink **Data Streams**.
 
-> ⚠️ **CATATAN KEJUJURAN:** file capture live yang dijanjikan
-> (`tests/fixtures/gamma_updown_live_fixture.json`) tiba dalam keadaan **kosong
-> (`[]`)** saat `git pull`. Record di sini **direkonstruksi presisi dari temuan
-> data live yang diverifikasi di VPS** (tercantum di task B3). **TODO:** ganti
-> dengan capture mentah 1:1 dari Gamma saat akses jaringan non-proxy tersedia,
-> agar regresi schema benar-benar terkunci ke respons produksi.
+## `ws_market_capture.json`
+
+Rekaman pesan WS channel `market` (`wss://.../ws/market`). Array berisi urutan
+frame: frame[0] = **book snapshot** (JSON **array**, satu objek per token UP/DOWN),
+frame[1..] = **price_change** (dict; `price_changes[]` dgn side BUY/SELL, size 0
+⇒ hapus level; ada `best_bid`/`best_ask`). Dipakai oleh `tests/adapters/test_clob_ws.py`.
+
+Token: UP=`77079965...513`, DOWN=`68703425...843` (condition
+`0xf18e1439...76ef`). best_bid = harga tertinggi bids; best_ask = terendah asks.

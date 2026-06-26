@@ -152,7 +152,12 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
     store = await Store.open(settings.db_url)
     clock = SystemClock()
     gamma = HttpGammaClient(settings.gamma_base_url)
-    ws = HttpClobWS(settings.clob_wss_url, clock=clock, stale_ms=settings.stale_ms)
+    ws = HttpClobWS(
+        settings.clob_wss_url,
+        clock=clock,
+        stale_ms=settings.ws_stale_seconds * 1000,
+        app_ping_seconds=settings.ws_app_ping_seconds,
+    )
     reader = Web3AggregatorReader(
         rpc_url=settings.polygon_rpc_url,
         address=settings.chainlink_btcusd_source,

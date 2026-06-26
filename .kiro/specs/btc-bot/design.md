@@ -9,8 +9,9 @@ Detail penuh: /docs/02-ARCHITECTURE.md & /docs/08-MODULE_SPECS.md.
   via **slug** `asset-updown-(5m|15m)-epoch`; window dari eventStartTime/endDate
   bukan startDate; query jendela end_date + UA browser; parse fee `crypto_fees_v2`
   & resolutionSource=Chainlink Data Streams), clob (REST+signing), clob_ws
-  (market+user WSS), chainlink (price truth: ChainlinkDataFeed via eth_call,
-  read-only; PriceSource Protocol; Data Streams menyusul di B2b).
+  (market WSS: book snapshot=array & price_change, BookState per asset, path
+  /ws/market; reconnect/backoff/stale), chainlink (price truth: ChainlinkDataFeed
+  via eth_call, read-only; PriceSource Protocol; Data Streams menyusul di B2b).
 - **Domain (murni)**: market (interval-loader), signal (trend/edge), strategy
   (entry/hedge/exit).
 - **Exec**: sizing (fractional Kelly+caps), oms (order mgmt, paper/live).

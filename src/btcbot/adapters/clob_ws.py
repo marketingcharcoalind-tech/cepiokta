@@ -45,7 +45,9 @@ if TYPE_CHECKING:
 # TODO(verify): konfirmasi nama channel & format subscribe ke docs CLOB V2.
 CHANNEL_MARKET = "market"
 CHANNEL_USER = "user"
-PING_PAYLOAD = json.dumps({"type": "ping"})
+# Heartbeat aplikasi-level: server CLOB mengharap teks "PING" → balas "PONG".
+# (Keepalive protokol-level library dimatikan; lihat default_connect_factory.)
+PING_PAYLOAD = "PING"
 
 # Tipe alias kontrak (docs/04 §4.7).
 BookUpdate = OrderBook
@@ -279,11 +281,13 @@ class HttpClobWS:
         url: URL WSS CLOB (Settings.clob_wss_url).
         connect: Factory pembuat :class:`WSConnection` (default: websockets).
         clock: Sumber waktu (default :class:`SystemClock`).
-        stale_ms: Ambang stale (ms) tanpa pesan → emit STALE + ping.
+        stale_ms: Ambang stale (ms) tanpa pesan → tutup & reconnect.
+        app_ping_seconds: Interval heartbeat aplikasi-level (kirim PING).
         backoff_initial: Backoff awal (detik).
         backoff_factor: Pengali backoff eksponensial.
         backoff_max: Backoff maksimum (detik).
-        sleep: Fungsi tidur (injectable; default ``asyncio.sleep``).
+        sleep: Fungsi tidur backoff (injectable; default ``asyncio.sleep``).
+        ping_sleep: Fungsi tidur heartbeat (injectable; default ``asyncio.sleep``).
         event_sink: Callback penerima :class:`CircuitEvent` (untuk circuit breaker).
         max_reconnects: Batas reconnect berturut sebelum menyerah (None = tak
             terbatas; berguna untuk test agar stream berakhir).
@@ -295,11 +299,13 @@ class HttpClobWS:
         *,
         connect: WSConnectFactory | None = None,
         clock: Clock | None = None,
-        stale_ms: int = 1500,
+        stale_ms: int = 30_000,
+        app_ping_seconds: float = 10.0,
         backoff_initial: float = 0.5,
         backoff_factor: float = 2.0,
         backoff_max: float = 30.0,
         sleep: SleepFunc = asyncio.sleep,
+        ping_sleep: SleepFunc = asyncio.sleep,
         event_sink: EventSink | None = None,
         max_reconnects: int | None = None,
     ) -> None:
@@ -307,10 +313,12 @@ class HttpClobWS:
         self._connect = connect or default_connect_factory
         self._clock = clock or SystemClock()
         self._stale_sec = stale_ms / 1000.0
+        self._app_ping_sec = app_ping_seconds
         self._backoff_initial = backoff_initial
         self._backoff_factor = backoff_factor
         self._backoff_max = backoff_max
         self._sleep = sleep
+        self._ping_sleep = ping_sleep
         self._event_sink = event_sink
         self._max_reconnects = max_reconnects
         self._closed = False
@@ -378,26 +386,50 @@ class HttpClobWS:
     # ----- internals -----
 
     async def _read_market(self, conn: WSConnection) -> AsyncIterator[OrderBook]:
-        """Loop baca pesan; deteksi stale via timeout lalu ping (heartbeat).
+        """Loop baca pesan + heartbeat aplikasi-level + deteksi stale.
 
-        Pesan bisa berupa LIST (book snapshot, satu objek per token) atau DICT
-        (price_change / event lain). State book di-reset per koneksi.
+        Pesan bisa LIST (book snapshot per token) atau DICT (price_change / event
+        lain). Frame non-JSON (mis. "PONG"/"PING") di-skip aman. Heartbeat
+        dikirim oleh task terpisah (:meth:`_heartbeat`) agar koneksi tetap hidup
+        meski data mengalir terus. Jika tak ada pesan > ``stale_sec`` → koneksi
+        dianggap mati → keluar (memicu reconnect dengan backoff).
         """
         state = BookState()
-        while True:
-            try:
-                raw = await asyncio.wait_for(conn.recv(), timeout=self._stale_sec)
-            except TimeoutError:
-                self._emit(EventType.STALE, f"tidak ada pesan > {self._stale_sec}s")
-                await conn.send(PING_PAYLOAD)
-                continue
-            obj = json.loads(raw)
-            elements = obj if isinstance(obj, list) else [obj]
-            for elem in elements:
-                if not isinstance(elem, dict):
+        hb_task = asyncio.create_task(self._heartbeat(conn))
+        try:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(conn.recv(), timeout=self._stale_sec)
+                except TimeoutError:
+                    self._emit(EventType.STALE, f"tidak ada pesan > {self._stale_sec}s")
+                    return
+                try:
+                    obj = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    # Frame non-JSON (mis. balasan "PONG"/"PING") → skip aman.
                     continue
-                for book in parse_ws_element(elem, state, self._clock):
-                    yield book
+                elements = obj if isinstance(obj, list) else [obj]
+                for elem in elements:
+                    if not isinstance(elem, dict):
+                        continue
+                    for book in parse_ws_element(elem, state, self._clock):
+                        yield book
+        finally:
+            hb_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await hb_task
+
+    async def _heartbeat(self, conn: WSConnection) -> None:
+        """Kirim ``PING`` tiap ``app_ping_seconds`` (heartbeat aplikasi-level).
+
+        Wajib karena keepalive protokol-level library dimatikan (server CLOB
+        tidak membalas ping protokol). Berhenti diam-diam saat koneksi putus;
+        dibatalkan oleh :meth:`_read_market` ketika stream berakhir.
+        """
+        with contextlib.suppress(WSConnectionClosedError, OSError):
+            while True:
+                await self._ping_sleep(self._app_ping_sec)
+                await conn.send(PING_PAYLOAD)
 
     async def _subscribe(self, conn: WSConnection, token_ids: list[str]) -> None:
         """Kirim pesan subscribe channel market (format resmi CLOB)."""
@@ -463,6 +495,19 @@ class _WebsocketsConnection:
 
 
 async def default_connect_factory(url: str) -> WSConnection:
-    """Factory koneksi nyata menggunakan library ``websockets``."""
-    ws = await websockets.connect(url)
+    """Factory koneksi nyata via ``websockets`` (keepalive library DIMATIKAN).
+
+    Server CLOB Polymarket tidak membalas ping protokol-level → set
+    ``ping_interval=None``/``ping_timeout=None`` agar library tidak menutup
+    koneksi (1011) meski data mengalir. Keepalive dijaga heartbeat aplikasi
+    (kirim "PING"). Library tetap AUTO-membalas ping yang DITERIMA dari server.
+    """
+    ws = await websockets.connect(
+        url,
+        ping_interval=None,
+        ping_timeout=None,
+        close_timeout=5,
+        open_timeout=10,
+        max_size=None,  # book snapshot bisa besar
+    )
     return _WebsocketsConnection(ws)
