@@ -110,8 +110,10 @@ window tetap utuh; jitter depth menengah sengaja dijatuhkan.
 Diisi oleh resolution recorder (`data/resolver.py`) setelah `window_end`:
 - `resolved_outcome` = `"UP"`/`"DOWN"` + `status='resolved'`.
 - `resolution_source` = `"gamma"` (primer). Gamma melaporkan token pemenang via
-  `outcomePrices` (mis. `["1","0"]`) saat market `closed`/`umaResolutionStatus`
-  resolved — inilah yang benar-benar dibayar (ground truth).
+  `outcomePrices` (JSON-string, mis. `["1","0"]` → pemenang = index bernilai
+  `"1"`) saat market `closed==true` & `outcomePrices` definitif (tepat satu ≥0.99,
+  sisanya ≤0.01) — inilah yang benar-benar dibayar (ground truth).
+  `umaResolutionStatus` **BUKAN** syarat (boleh `"resolved"` tapi tidak dipakai).
 - `settlement_price` = harga Chainlink saat cross-check (best-effort; hanya untuk
   ronde yang BARU berakhir, backfill ronde lama → NULL). Bila outcome Chainlink
   (settlement vs `start_price`) ≠ Gamma → log `resolution_mismatch` (menyingkap

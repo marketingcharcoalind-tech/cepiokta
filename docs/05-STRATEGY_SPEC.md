@@ -21,7 +21,8 @@
 | `DELTA_THRESHOLD` | tergantung volatilitas | `|Δ|` minimum agar dianggap "memimpin meyakinkan". Sebaiknya skala dengan ATR/volatilitas window. |
 | `MAX_PRICE` | 0.99 | Jangan beli di atas ini (edge habis). |
 | `MIN_PRICE` | 0.80 | Jangan beli di bawah ini (kepastian terlalu rendah). |
-| `MIN_EDGE` | > 0 setelah biaya | Ambang edge bersih minimum. |
+| `MIN_EDGE` | > 0 setelah biaya | Ambang edge bersih minimum (wajib > fee 7% + slippage). |
+| `FEE_RATE` | 0.07 (taker) | Fee `crypto_fees_v2`; dipakai `signal/fees.py`. Kalibrasi G1. |
 | `FLIP_RATIO` | 0.90 | Jika book sisi lawan menguat ≥ ini ⇒ trigger hedge. |
 | `MAX_NOTIONAL_ROUND` | kecil | Cap nilai per ronde (lihat sizing). |
 
@@ -43,9 +44,15 @@ gross_edge = p_win * (1 - ask_win) - (1 - p_win) * ask_win
 net_edge   = gross_edge - fees_per_share - expected_slippage
 ENTRY hanya jika: net_edge >= MIN_EDGE
 ```
-> Insight kunci: entry menguntungkan hanya bila `p_win > ask_win + biaya`.
+> ✅ **Terverifikasi (live, KRITIS)**: market crypto up/down BERBIAYA —
+> `feesEnabled:true`, `feeType:"crypto_fees_v2"`, `rate:0.07`, `takerOnly:true`.
+> `fees_per_share` **bukan nol**: hitung dari fee taker ~7% via modul
+> `signal/fees.py` (pluggable, default konservatif `FEE_RATE=0.07`;
+> `# TODO reverse-engineer base notional vs profit — calibrate G1`). Semua
+> net_edge/PnL/backtest/paper/live WAJIB net-of-fee.
+> Insight kunci: entry menguntungkan hanya bila `p_win > ask_win + fee + slippage`.
 > Jika market efisien, `ask_win ≈ p_win` ⇒ `net_edge ≤ 0`. Backtest harus
-> membuktikan ada momen `p_win` jelas > `ask_win`.
+> membuktikan ada momen `p_win` jelas > `ask_win` **setelah fee 7%**.
 
 ## 5.4 Aturan Entry (pseudocode)
 ```

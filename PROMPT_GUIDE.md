@@ -1,4 +1,4 @@
-# PROMPT GUIDE — Copy-Paste untuk AI Coding Agent
+# PROMPT GUIDE — Copy-Paste untuk AI Coding Agent  (v1.2)
 
 > Panduan ini berisi **prompt siap tempel** untuk membangun `5min-btc-polymarket`
 > dari nol sampai bot running, fase demi fase, task demi task.
@@ -13,6 +13,62 @@
 > **Aturan emas (ingatkan agent kapanpun perlu):**
 > - Default `MODE=readonly`. Tidak ada order live sebelum Fase 0–2 lulus.
 > - Tidak ada secret di source. Decimal untuk uang. UTC untuk waktu. Test-first.
+
+### 📌 Changelog
+- **v1.2** — Injeksi **TEMUAN NYATA** dari VPS jaringan-bersih (verifikasi lawan
+  API live + dikunci sebagai fixture). Tambah blok **✅ VERIFIED REALITY** di
+  bawah, plus callout `> ✅ VERIFIED:` di tiap prompt terkait. Koreksi kritis:
+  market crypto up/down **BERBIAYA ~7% taker** (asumsi zero-fee SALAH); skema
+  adapter nyata (Gamma `closed` flag, WS `/ws/market` LIST/DICT, Chainlink
+  failover + Data Streams), resolusi via `outcomePrices`, retensi book. Sinkron
+  docs/04,05,06,07,09.
+- **v1.1** — Telegram control plane (T.1–T.3) + addendum notifikasi P&L/Error.
+- **v1.0** — Prompt fase 0–4 + strategi (S.*) + multi-market (M.*).
+
+---
+
+## ✅ VERIFIED REALITY (v1.2 — ground truth dari VPS jaringan-bersih)
+
+> Semua poin di bawah **sudah dikonfirmasi lawan API live** dan **dikunci sebagai
+> fixture**. Ini **sumber kebenaran** untuk SEMUA prompt di bawah. Jika prompt
+> lama bertentangan dengan blok ini, blok ini yang menang.
+
+1. **Slug market**: `{asset}-updown-{5m|15m}-{epoch}`
+   (mis. `btc-updown-5m-1782480000`). `round_no = epoch` window;
+   `round_no % 300 == 0` (5m) / `% 900 == 0` (15m). Cross-check fixture:
+   `1782480000` → `2026-06-26T13:25:00Z`.
+2. **Gamma discovery (market hidup)**: `GET /markets?closed=false&active=true`
+   lalu filter **regex slug**. **Resolusi (market selesai)**: WAJIB `closed=true`
+   (tanpa flag itu hasil selalu kosong → `--resolve-backfill` lapor `resolved:0`).
+   Window ronde: `eventStartTime` → `endDate` (BUKAN `startDate` = tanggal
+   listing). Header **`User-Agent` browser wajib**.
+3. **FEE (KRITIS)**: market crypto up/down → `feesEnabled:true`,
+   `feeType:"crypto_fees_v2"`, `rate:0.07`, `takerOnly:true`. **Asumsi zero-fee
+   SALAH.** Semua `net_edge`/PnL/backtest/paper/live **harus mengurangi fee taker
+   ~7%**. Implementasi: modul `signal/fees.py` pluggable, default konservatif
+   `FEE_RATE=0.07`, `# TODO reverse-engineer base notional vs profit — calibrate G1`.
+4. **Chainlink (harga live)**: BTC/USD **Data Feed**
+   `0xc907E116054Ad103354f2D350FD2514433D57F6f` (Polygon). RPC failover terurut:
+   `chainstack → publicnode → blastapi → blockpi`, **`User-Agent` browser** untuk
+   RPC publik (403 tanpa UA). Catatan: **resolusi** market memakai Chainlink
+   **Data Streams** (≠ Data Feeds) → `settlement_price` saat ini **best-effort**;
+   adapter Data Streams menyusul (B2b) untuk presisi.
+5. **CLOB WebSocket**: path **`/ws/market`** (BUKAN `/ws`). Market channel kirim
+   **DUA bentuk**: (a) **LIST** = snapshot awal, (b) **DICT** = `price_change`.
+   `side=BUY` → bids, `side=SELL` → asks. Keepalive: `ping_interval=None` +
+   heartbeat aplikasi `"PING"` tiap **10 dtk** (server memutus ~45 dtk bila tak ada).
+6. **Resolusi outcome**: `outcomes` & `outcomePrices` datang sebagai **JSON-string**
+   → `json.loads`. Pemenang = index bernilai `"1"`: `["1","0"]`→**UP**,
+   `["0","1"]`→**DOWN** (`outcomes` = `["Up","Down"]`). `umaResolutionStatus`
+   **JANGAN** dijadikan syarat; cukup `closed==true && outcomePrices definitif`
+   (tepat satu ≥0.99, sisanya ≤0.01). `resolution_source="gamma"`.
+7. **Retensi `book_snapshots`**: tulis hanya saat **best berubah**, maks **1/dtk**
+   bila best sama, **full-res 45 dtk terakhir** window
+   (~16–20k baris/ronde; runway minggu-an). Schema kolom tetap (tanpa migrasi).
+8. **SDK**: `py-clob-client` **diarsipkan Mei 2026** → gunakan **CLOB V2** (REST +
+   signing **EIP-712** sendiri).
+9. **Fixtures terkunci**: `tests/fixtures/gamma_resolved_markets.json` (+ fixtures
+   book/round dari VPS) = **ground truth**, jangan regresi.
 
 ---
 
@@ -82,6 +138,13 @@ DoD: unit test SimClock deterministik; semua waktu tz-aware UTC.
 ```
 
 ## PROMPT 0.4 — Gamma adapter (discovery market)
+> ✅ VERIFIED (lihat VERIFIED REALITY #1,#2,#3): ganti placeholder/"harus
+> diverifikasi" → filter **regex slug** `{asset}-updown-{5m|15m}-{epoch}`;
+> discovery pakai `?closed=false&active=true`, resolusi WAJIB `?closed=true`;
+> window ronde dari `eventStartTime`→`endDate` (BUKAN `startDate`); **parse field
+> fee** (`feesEnabled/feeType=crypto_fees_v2/rate=0.07/takerOnly`); header
+> `User-Agent` browser wajib; simpan satu respons asli sebagai fixture & jangan
+> regresi `tests/fixtures/gamma_resolved_markets.json`.
 ```
 Implement src/btcbot/adapters/gamma.py sesuai docs/04 §4.3 & docs/08 §8.2.
 Deliverable:
@@ -95,6 +158,11 @@ DoD: unit test mapping pakai respx (mock HTTP). Tidak hit jaringan asli saat tes
 ```
 
 ## PROMPT 0.5 — CLOB WebSocket (market data)
+> ✅ VERIFIED (lihat VERIFIED REALITY #5): path **`/ws/market`** (BUKAN `/ws`);
+> market channel kirim **dua bentuk** — **LIST** = snapshot awal, **DICT** =
+> `price_change`; `side=BUY`→bids, `side=SELL`→asks; keepalive `ping_interval=None`
+> + heartbeat aplikasi `"PING"` tiap 10s (server memutus ~45s bila sepi); stale
+> 30s → reconnect. Normalisasi pesan ke `BookState` per asset.
 ```
 Implement src/btcbot/adapters/clob_ws.py sesuai docs/04 §4.4 & docs/08 §8.4.
 Deliverable:
@@ -108,6 +176,13 @@ reconnect, dan kondisi stale. Deterministik.
 ```
 
 ## PROMPT 0.6 — Chainlink price feed (price truth)
+> ✅ VERIFIED (lihat VERIFIED REALITY #4): BTC/USD **Data Feed**
+> `0xc907E116054Ad103354f2D350FD2514433D57F6f` (Polygon); RPC failover
+> `chainstack → publicnode → blastapi → blockpi` + `User-Agent` browser (RPC
+> publik 403 tanpa UA); gagal/timeout/HTTP/`price<=0`/stale → endpoint berikut;
+> semua gagal → `AllRpcFailedError`. Catatan: **resolusi** market pakai Chainlink
+> **Data Streams** (≠ Data Feeds) → `settlement_price` best-effort; adapter Data
+> Streams menyusul (B2b).
 ```
 Implement src/btcbot/adapters/chainlink.py sesuai docs/04 §4.6 & docs/08 §8.5.
 Deliverable:
@@ -120,6 +195,13 @@ DoD: unit test pakai FakePriceFeed; Decimal; tz-aware.
 ```
 
 ## PROMPT 0.7 — Store + Recorder (persistensi)
+> ✅ VERIFIED (lihat VERIFIED REALITY #6,#7): retensi `book_snapshots` =
+> write-on-change + throttle 1/dtk bila best sama + full-res 45 dtk terakhir
+> (`BOOK_SAMPLE_MS`/`BOOK_FINEGRAIN_SEC`/`BOOK_PERSIST_MODE`); schema tetap (tanpa
+> migrasi). **Resolution recorder** (`data/resolver.py`): resolusi WAJIB
+> `closed=true`, `outcomes`/`outcomePrices` = JSON-string → `json.loads`, pemenang
+> = index bernilai `"1"`, kolom additive `settlement_price`/`resolution_source`
+> (`"gamma"`), backfill via `--resolve-backfill`. `umaResolutionStatus` bukan syarat.
 ```
 Implement src/btcbot/data/store.py dan data/recorder.py sesuai docs/07 & docs/08 §8.12.
 Deliverable:
@@ -165,6 +247,9 @@ Laporkan ringkasan dan update PROGRESS_TRACKER.md (tandai Fase 0 selesai).
 # ════════════════════════════════════════════════
 
 ## PROMPT 1.1 — Interval loader (domain murni)
+> ✅ VERIFIED (lihat VERIFIED REALITY #1): cadence epoch `%300==0` (5m) /
+> `%900==0` (15m); slug `{asset}-updown-{5m|15m}-{epoch}`; cross-check fixture
+> `1782480000` → `2026-06-26T13:25:00Z`.
 ```
 Implement src/btcbot/domain/market.py sesuai docs/08 §8.6 & docs/05.
 Deliverable: current_window(now), time_left(now), is_entry_window(now, T_ENTRY_SEC).
@@ -173,6 +258,11 @@ DoD: unit test edge cases (sebelum/saat/sesudah window, batas T_ENTRY_SEC).
 ```
 
 ## PROMPT 1.2 — Signal engine (edge math)
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): `net_edge = p_win − ask_win −
+> fee_per_share − expected_slippage`, dengan `fee_per_share` dari
+> `crypto_fees_v2` **7% taker** (modul `signal/fees.py` pluggable, default
+> `FEE_RATE=0.07`); σ (`sigma_left`) dikalibrasi di G1 dari realized vol.
+> JANGAN biarkan asumsi zero-fee.
 ```
 Implement src/btcbot/domain/signal.py sesuai docs/05 §5.1-5.3 & docs/08 §8.7.
 Deliverable: compute(round, price_now, now, vol) -> Signal yang menghitung
@@ -183,6 +273,9 @@ Fungsi murni & deterministik.
 ```
 
 ## PROMPT 1.3 — Strategy (entry/hedge/exit, never-fade)
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): `MIN_EDGE` wajib **> fee 7% +
+> slippage** (entry hanya bila edge bersih lolos biaya nyata); taker-only;
+> tetap **never-fade** & cap harga (`MIN_PRICE`/`MAX_PRICE`).
 ```
 Implement src/btcbot/domain/strategy.py sesuai docs/05 §5.4-5.7 & docs/08 §8.8.
 Deliverable: on_tick(signal, book, position) -> list[Decision]
@@ -193,6 +286,9 @@ DoD: unit test untuk tiap cabang keputusan + anti-pattern (harus NoOp).
 ```
 
 ## PROMPT 1.4 — Sizing (fractional Kelly + caps)
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): EV/Kelly dihitung **net-of-fee** —
+> gunakan edge setelah fee taker 7% + slippage, bukan gross. Size 0 bila
+> `net_edge <= MIN_EDGE`.
 ```
 Implement src/btcbot/exec/sizing.py sesuai docs/06 §6.2 & docs/08 §8.9.
 Deliverable: size(signal, bankroll, depth, limits) -> Decimal dengan fractional
@@ -202,6 +298,10 @@ size 0 saat net_edge<=0.
 ```
 
 ## PROMPT 1.5 — Replay engine + fill model
+> ✅ VERIFIED (lihat VERIFIED REALITY #3,#5,#6): fill model + **fee taker 7%** +
+> slippage telusur level; settlement PnL pakai **label UP/DOWN dari Gamma**
+> (`outcomePrices`); book input = recorded (sudah ternormalisasi LIST/DICT,
+> retensi non-seragam → last-value-carried-forward).
 ```
 Implement src/btcbot/backtest/replay.py sesuai docs/09 §9.3 & docs/08 §8.13.
 Deliverable:
@@ -215,6 +315,9 @@ DoD: backtest deterministik (seed tetap) menghasilkan PnL yang reproducible.
 ```
 
 ## PROMPT 1.6 — Laporan metrik & kalibrasi
+> ✅ VERIFIED (lihat VERIFIED REALITY #3,#6): reliability curve dgn **label nyata
+> Gamma**; ablation **wajib sertakan fee 7%**; headline **Net PnL setelah fee**;
+> kalibrasi σ dari realized vol data terekam.
 ```
 Tambahkan reporting di backtest (script/CLI) sesuai docs/09 §9.4.
 Deliverable: cetak/ча simpan Net PnL, ROI, win-rate, distribusi net_edge saat
@@ -225,6 +328,9 @@ DoD: jalankan pada data terekam Fase 0 dan tampilkan laporannya ke saya.
 ```
 
 ## ✅ GATE G1 — keputusan berbasis data
+> ✅ VERIFIED (lihat VERIFIED REALITY #3,#6): keputusan edge harus **net fee 7% +
+> slippage**, stabil lintas beberapa hari (anti-overfit), pakai **label Gamma**.
+> Di sini juga kalibrasi `FEE_RATE` (reverse-engineer `crypto_fees_v2`) & σ.
 ```
 Buat ringkasan G1: apakah net_edge > 0 STABIL di beberapa rentang parameter dan
 beberapa hari data berbeda (bukan overfit)? Sertakan reliability curve & ablation.
@@ -249,6 +355,8 @@ trigger benar; property test "tak pernah loloskan order > limit".
 ```
 
 ## PROMPT 2.2 — OMS mode paper
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): paper fills **mengurangi fee taker 7%**
+> (sama dengan replay) agar paper konsisten net-of-fee dengan backtest.
 ```
 Implement src/btcbot/exec/oms.py mode paper sesuai docs/08 §8.10.
 Deliverable: submit(decision) -> OrderAck dengan simulasi fill realtime memakai
@@ -260,6 +368,8 @@ idempotent (retry tidak dobel).
 ```
 
 ## PROMPT 2.3 — Paper runner + ledger
+> ✅ VERIFIED (lihat VERIFIED REALITY #3,#5): ledger PnL **net-of-fee 7%**; data
+> live via WS `/ws/market` (LIST/DICT ternormalisasi). Log per ronde net-of-fee.
 ```
 Implement src/btcbot/app/paper.py sesuai docs/08 §8.14 & docs/10 Fase 2.
 Deliverable: loop realtime (adapters live data, MODE=paper) -> signal -> strategy
@@ -270,6 +380,9 @@ DoD: jalan realtime beberapa jam; output log mirip screenshot; PnL tercatat.
 ```
 
 ## PROMPT 2.4 — Reconciliation + alert dasar
+> ✅ VERIFIED (lihat VERIFIED REALITY #3,#6): reconciliation **sertakan fee 7%**;
+> resolusi posisi pakai label Gamma (`outcomePrices`); bandingkan PnL paper vs
+> backtest harus konsisten **net-of-fee**.
 ```
 Tambah rekonsiliasi sesuai docs/06 §6.5 & docs/09. Cocokkan order<->fill<->posisi
 <->resolusi<->saldo tiap ronde; mismatch -> freeze + alert. Implement alert
@@ -294,6 +407,8 @@ Laporkan & update PROGRESS_TRACKER.md. Jangan ke Fase 3 jika tidak konsisten.
 > ⚠️ Mulai uang nyata. Verifikasi dulu semua item di docs/04 §4.8.
 
 ## PROMPT 3.1 — Signer EIP-712 (CLOB V2) + auth
+> ✅ VERIFIED (lihat VERIFIED REALITY #8): **`py-clob-client` diarsipkan Mei 2026**
+> → wajib **CLOB V2** (REST + signing EIP-712 sendiri). EIP-712 domain = Polygon.
 ```
 Implement signing & auth CLOB V2 sesuai docs/04 §4.2 & §4.5.
 Deliverable: Signer (Protocol) + impl eth-account untuk EIP-712 skema order V2;
@@ -305,6 +420,8 @@ ter-log. VERIFIKASI skema V2 dari dokumentasi resmi terbaru sebelum final.
 ```
 
 ## PROMPT 3.2 — OMS mode live
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): PnL live & fill tracking **net-of-fee
+> taker 7%**; track fill via `stream_user()` WS (`/ws/market` infra yang sama).
 ```
 Perluas exec/oms.py untuk mode live: submit order nyata via ClobClient
 (FOK/FAK), track fill via stream_user() (WSS). WAJIB lewat RiskManager.
@@ -324,6 +441,8 @@ membatalkan order terbuka; circuit breaker menghentikan entry.
 ```
 
 ## PROMPT 3.4 — Monitoring & alerting
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): metrik PnL/balance & notifikasi
+> **net-of-fee 7%**; pantau `ws_state` (keepalive `/ws/market`) & RPC failover.
 ```
 Tambah observability sesuai docs/06 §6.7: Prometheus exporter (metrik: pnl,
 balance, orders, fills, vetoes, latency, ws_state) + dashboard Grafana (JSON).
@@ -354,6 +473,10 @@ reconciliation. Update PROGRESS_TRACKER.md. Scale-up DILARANG sampai G4.
 # ════════════════════════════════════════════════
 
 ## PROMPT 4.1 — Ketahanan & deploy
+> ✅ VERIFIED (lihat VERIFIED REALITY #4,#5): failover RPC nyata =
+> `chainstack → publicnode → blastapi → blockpi` + `User-Agent` browser; WSS
+> failover + pola keepalive `/ws/market` (`ping_interval=None` + heartbeat
+> `"PING"` 10s, stale 30s → reconnect). Jangan kirim order ganda saat failover.
 ```
 Tambah failover RPC & WSS (endpoint cadangan), Dockerfile + docker-compose,
 systemd unit (restart=always), backup DB terjadwal, dan NTP check di startup.
@@ -434,6 +557,8 @@ DoD: unit test format & queue; mock Telegram API (tanpa hit jaringan); test
 ```
 
 ## PROMPT T.2 — Perintah & tombol read-only
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): render hasil ronde/PnL di
+> `/status`,`/pnl`,`/recent` **net-of-fee taker 7%** (jangan tampilkan gross).
 ```
 Implement ControlFacade (app/control.py) + handler perintah Telegram read-only
 sesuai docs/12 §12.5-12.6.
@@ -448,6 +573,8 @@ status; mock Telegram.
 ```
 
 ## PROMPT T.3 — Aksi kontrol (pause/resume/kill) + konfirmasi
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): semua angka P&L pada notifikasi/aksi
+> render **net-of-fee taker 7%**.
 ```
 Tambah aksi kontrol Telegram sesuai docs/12 §12.3 & docs/06 addendum.
 Deliverable:
@@ -533,6 +660,9 @@ DoD: paper menunjukkan spread-capture > adverse selection; risk inventory terken
 ```
 
 ## PROMPT M.1 — Market Registry & Config
+> ✅ VERIFIED (lihat VERIFIED REALITY #1): cadence terverifikasi 5m=`%300`,
+> 15m=`%900`; slug regex per-asset `{asset}-updown-{5m|15m}-{epoch}`
+> (`btc`/`eth`/`sol`).
 ```
 Implement domain/market_registry.py + MarketSpec (docs/14 §14.3). Baca daftar
 market (asset,timeframe,enabled,weight,params) dari MARKETS_CONFIG (markets.yaml).
@@ -540,6 +670,9 @@ DoD: parsing config + test; default hanya BTC 5m enabled.
 ```
 
 ## PROMPT M.2 — MarketScanner + per-market Worker
+> ✅ VERIFIED (lihat VERIFIED REALITY #1,#2): discovery per asset×timeframe pakai
+> regex slug + `closed=false&active=true`; cadence `%300`/`%900`; tiap fee market
+> di-parse (`crypto_fees_v2` 7%).
 ```
 Generalisasi pipeline jadi multi-market (docs/14 §14.4):
 - app/scanner.py (MarketScanner): discovery ronde tiap aset×timeframe via Gamma,
@@ -551,6 +684,8 @@ DoD: 2+ market jalan paralel di paper; data ber-asset/timeframe; test scanner/wo
 ```
 
 ## PROMPT M.3 — Risk multi-market & korelasi
+> ✅ VERIFIED (lihat VERIFIED REALITY #3): semua limit & PnL per-market dihitung
+> **net-of-fee 7%**; validasi edge per market wajib net biaya.
 ```
 Perluas RiskManager (docs/14 §14.6 & docs/06 addendum v1.3): limit per-market,
 per-asset, MAX_CORRELATED_DIRECTIONAL (BTC/ETH/SOL satu faktor risiko), global.

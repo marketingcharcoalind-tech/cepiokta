@@ -14,6 +14,9 @@
 | `MAX_ORDERS_PER_MIN` | rate sehat | throttle |
 
 ## 6.2 Position Sizing
+> ✅ **Terverifikasi (live)**: market crypto up/down kena fee taker **~7%**
+> (`crypto_fees_v2`). EV/Kelly di bawah WAJIB dihitung **net-of-fee** — gunakan
+> `edge`/`p_win` setelah fee 7% + slippage, bukan gross. Sumber: docs/05 §5.3.
 - Default: **fractional Kelly** dibatasi cap notional, cap % bankroll, dan depth.
 ```
 kelly_fraction_calc = max(0, (p_win*(1) - (1-p_win)*ask) / ask)   # b = (1-ask)/ask form

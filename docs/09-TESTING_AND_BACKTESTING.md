@@ -20,11 +20,15 @@ PaperOMS(fill model) → catat `round_results`.
 
 **Fill model realistis (kritikal):**
 - Order taker FOK/FAK hanya terisi jika `ask ≤ harga order` DAN depth cukup.
+- **Fee taker ~7% (terverifikasi, `crypto_fees_v2`)**: kurangi dari tiap fill;
+  PnL settlement net-of-fee. Asumsi zero-fee SALAH.
 - Terapkan **slippage**: isi menelusuri level book, bukan semua di best ask.
 - Tambah **latensi**: keputusan pakai book `t`, fill pakai book `t+latency`
   (book bisa sudah bergerak → simulasikan adverse selection).
 - Asumsikan **kompetisi**: opsi konservatif = hanya dapat fill jika ada surplus
   size di atas yang "diambil bot lain".
+- **Label resolusi = Gamma** (`outcomePrices`, lihat docs/07 §7.3.2): UP/DOWN dari
+  index bernilai `"1"`, bukan asumsi `Δ≥0` semata.
 
 ## 9.4 Metrik Wajib Dilaporkan
 - Net PnL, ROI, jumlah ronde, win-rate aktual.
@@ -33,6 +37,7 @@ PaperOMS(fill model) → catat `round_results`.
 - Max drawdown, varians PnL, Sharpe-like ratio.
 - Sensitivitas grid: `T_ENTRY_SEC` × `DELTA_THRESHOLD` × `MAX_PRICE`.
 - **Ablation**: PnL dengan vs tanpa fee, vs tanpa slippage, vs tanpa latensi.
+  Fee taker **~7%** WAJIB disertakan; headline **Net PnL setelah fee**.
   (Untuk lihat apakah edge hilang setelah biaya — biasanya iya.)
 
 ## 9.5 Kriteria Lulus untuk Naik Fase
