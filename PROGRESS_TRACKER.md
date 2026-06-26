@@ -49,7 +49,7 @@
 | 1.1 | Interval loader | domain/market.py | ✅ | ✅ | 2026-06-27 | pure; aligned_window/round_no_for + IntervalLoader (clock injectable); half-open [start,end); 31 test |
 | 1.2 | Signal engine (edge math) | domain/signal.py | ✅ | ✅ | 2026-06-27 | SignalEngine.compute (Δ,sigma_left,z,p_win=Φ(\|z\|),ask_win,net_edge); FeeModel pluggable (domain/fees.py, crypto_fees_v2 7% default) + FEE_RATE setting; net-of-fee; 28 test |
 | 1.3 | Strategy (entry/hedge/exit) | domain/strategy.py | ✅ | ✅ | 2026-06-27 | on_tick→Decision (EnterOrder/Hedge/Exit/NoOp); filter T_ENTRY/Δ/price-band/MIN_EDGE; hedge p_win<P_EXIT‖flip≥FLIP_RATIO; never-fade; +P_EXIT setting; 24 test |
-| 1.4 | Sizing (Kelly + caps) | exec/sizing.py | ✅ | ✅ | 2026-06-25 | dikerjakan di Phase 0.7: KELLY_FRACTION + cap %bankroll/notional/depth |
+| 1.4 | Sizing (Kelly + caps) | exec/sizing.py | ✅ | ✅ | 2026-06-27 | `size(signal,…)→Decimal` pakai net_edge net-of-fee + round_to_tick + min_order; refactor `_capped_size` (compute_size tetap); 720+ invariant cases |
 | 1.5 | Replay engine + fill model | backtest/replay.py | ⬜ | ⬜ | | |
 | 1.6 | Laporan metrik & kalibrasi | backtest reporting | ⬜ | ⬜ | | |
 
@@ -115,7 +115,7 @@
 ## 📊 Status Ringkas (isi cepat)
 ```
 Fase 0 [##########] 8/8     G0: ✅ LULUS (replay fixture)
-Fase 1 [####      ] 4/6     G1: belum   (edge terbukti? belum) — sizing + interval-loader + signal + strategy done
+Fase 1 [#####     ] 5/6     G1: belum   (edge terbukti? belum) — interval-loader + signal + strategy + sizing done
 Fase 2 [          ] 0/4     G2: belum
 Fase 3 [          ] 0/5     G3: belum
 Fase 4 [          ] 0/3     G4: belum

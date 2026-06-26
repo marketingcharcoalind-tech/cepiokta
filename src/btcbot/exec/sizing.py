@@ -10,6 +10,13 @@ Ukuran dibatasi oleh empat cap dan sebuah gerbang edge:
 
 Gerbang: bila ``edge <= MIN_EDGE`` → ukuran 0 (tidak entry).
 
+Dua API:
+- :func:`size` — kontrak docs/08 §8.9: ``size(signal, bankroll, depth, limits)``
+  memakai ``signal.net_edge`` yang **sudah net-of-fee** (tidak hitung ulang fee),
+  lalu membulatkan ke ``tick_size`` & floor ``min_order_size`` → ``Decimal``.
+- :func:`compute_size` — varian rinci (hitung edge dari ``fair_price/fee/slippage``)
+  yang mengembalikan :class:`SizingResult` (cap binding + edge) untuk diagnostik.
+
 Invariant (docs/05 §5.7): never-fade (ukuran hanya untuk sisi leader yang
 diberikan pemanggil), tidak beli di atas ``max_price``, dan ``size >= 0``.
 
@@ -25,6 +32,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from btcbot.config.settings import Settings
+    from btcbot.domain.models import Signal
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -51,10 +59,15 @@ class SizingLimits:
     min_edge: Decimal
     max_price: Decimal = _ONE
     min_order_size: Decimal = _ZERO
+    tick_size: Decimal = _ZERO  # 0 = tanpa pembulatan tick (per-ronde dari Round)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> SizingLimits:
-        """Bangun :class:`SizingLimits` dari konfigurasi global."""
+        """Bangun :class:`SizingLimits` dari konfigurasi global.
+
+        ``min_order_size`` & ``tick_size`` bersifat per-ronde (dari ``Round``)
+        sehingga TIDAK diisi di sini; set saat membangun limits untuk ronde.
+        """
         return cls(
             kelly_fraction=settings.kelly_fraction,
             max_notional_round=settings.max_notional_round,
@@ -77,6 +90,56 @@ class SizingResult:
 
 def _zero_result(edge: Decimal) -> SizingResult:
     return SizingResult(size=_ZERO, notional=_ZERO, binding_cap=BindingCap.NONE, edge=edge)
+
+
+def round_to_tick(size: Decimal, tick: Decimal) -> Decimal:
+    """Bulatkan ``size`` KE BAWAH ke kelipatan ``tick`` (0/negatif → tanpa ubah).
+
+    Pembulatan ke bawah agar tidak pernah melampaui cap likuiditas/notional.
+    """
+    if tick <= _ZERO:
+        return size
+    return (size // tick) * tick
+
+
+def _capped_size(  # noqa: PLR0913 - parameter eksplisit (keyword-only)
+    *,
+    edge: Decimal,
+    p_win: Decimal,
+    ask: Decimal,
+    bankroll: Decimal,
+    depth_available: Decimal,
+    limits: SizingLimits,
+) -> tuple[BindingCap, Decimal]:
+    """Hitung ukuran kontinu (share) ter-cap + cap yang binding (tanpa min/tick).
+
+    Mengembalikan ``(BindingCap.NONE, 0)`` bila input invalid (di luar invariant)
+    atau ``edge <= MIN_EDGE`` (tidak entry).
+    """
+    # Input invalid / di luar invariant → tidak entry.
+    if ask <= _ZERO or ask > limits.max_price:
+        return (BindingCap.NONE, _ZERO)
+    if bankroll <= _ZERO or depth_available < _ZERO:
+        return (BindingCap.NONE, _ZERO)
+    if edge <= limits.min_edge:
+        return (BindingCap.NONE, _ZERO)
+
+    # Kelly mentah (never-fade: di-floor ke 0).
+    kelly_raw = max(_ZERO, (p_win - (_ONE - p_win) * ask) / ask)
+    size_kelly = limits.kelly_fraction * kelly_raw * bankroll / ask
+
+    cap_notional = limits.max_notional_round / ask
+    cap_bankroll = (bankroll * limits.max_bankroll_fraction) / ask
+    cap_depth = depth_available * limits.fill_safety
+
+    candidates: list[tuple[BindingCap, Decimal]] = [
+        (BindingCap.KELLY, size_kelly),
+        (BindingCap.NOTIONAL, cap_notional),
+        (BindingCap.BANKROLL_FRACTION, cap_bankroll),
+        (BindingCap.DEPTH, cap_depth),
+    ]
+    binding_cap, chosen = min(candidates, key=lambda kv: kv[1])
+    return (binding_cap, max(_ZERO, chosen))
 
 
 def compute_size(  # noqa: PLR0913
@@ -106,37 +169,57 @@ def compute_size(  # noqa: PLR0913
         :class:`SizingResult` dengan ``size >= 0`` dan cap yang binding.
     """
     edge = fair_price - ask - fee - slippage
-
-    # Input invalid / di luar invariant → tidak entry.
-    if ask <= _ZERO or ask > limits.max_price:
-        return _zero_result(edge)
-    if bankroll <= _ZERO or depth_available < _ZERO:
-        return _zero_result(edge)
-    if edge <= limits.min_edge:
-        return _zero_result(edge)
-
-    # Kelly mentah (never-fade: di-floor ke 0).
-    kelly_raw = max(_ZERO, (p_win - (_ONE - p_win) * ask) / ask)
-    size_kelly = limits.kelly_fraction * kelly_raw * bankroll / ask
-
-    cap_notional = limits.max_notional_round / ask
-    cap_bankroll = (bankroll * limits.max_bankroll_fraction) / ask
-    cap_depth = depth_available * limits.fill_safety
-
-    candidates: list[tuple[BindingCap, Decimal]] = [
-        (BindingCap.KELLY, size_kelly),
-        (BindingCap.NOTIONAL, cap_notional),
-        (BindingCap.BANKROLL_FRACTION, cap_bankroll),
-        (BindingCap.DEPTH, cap_depth),
-    ]
-    binding_cap, size = min(candidates, key=lambda kv: kv[1])
-    size = max(_ZERO, size)
-
+    binding_cap, raw_size = _capped_size(
+        edge=edge,
+        p_win=p_win,
+        ask=ask,
+        bankroll=bankroll,
+        depth_available=depth_available,
+        limits=limits,
+    )
     # Tidak bisa memenuhi ukuran order minimum → tidak entry.
-    if size < limits.min_order_size:
+    if raw_size < limits.min_order_size:
         return _zero_result(edge)
+    return SizingResult(size=raw_size, notional=raw_size * ask, binding_cap=binding_cap, edge=edge)
 
-    return SizingResult(size=size, notional=size * ask, binding_cap=binding_cap, edge=edge)
+
+def size(
+    signal: Signal,
+    bankroll: Decimal,
+    depth: Decimal,
+    limits: SizingLimits,
+) -> Decimal:
+    """Ukuran order (share) untuk sisi pemimpin dari sebuah :class:`Signal`.
+
+    Kontrak docs/08 §8.9. Memakai ``signal.net_edge`` yang **SUDAH net-of-fee**
+    (~7% taker + slippage, dihitung SignalEngine — PROMPT_GUIDE ✅ VERIFIED
+    REALITY #3); sizer TIDAK menghitung ulang fee. Fractional Kelly
+    (``KELLY_FRACTION`` kecil) dibatasi ``MAX_NOTIONAL_ROUND``,
+    ``depth * FILL_SAFETY``, % bankroll, lalu dibulatkan ke ``tick_size`` dan
+    di-floor ``min_order_size``.
+
+    Args:
+        signal: Sinyal tick (sumber ``net_edge``/``p_win``/``ask_win``).
+        bankroll: Saldo aktif (paper/live). Lihat :func:`active_bankroll`.
+        depth: Total size tersedia di book sisi pemimpin (share).
+        limits: Batas & parameter sizing (termasuk ``tick_size``/``min_order_size``).
+
+    Returns:
+        Ukuran (share) ``>= 0``; ``0`` bila ``net_edge <= MIN_EDGE`` atau cap/tick
+        membuat ukuran di bawah ``min_order_size``.
+    """
+    _cap, raw = _capped_size(
+        edge=signal.net_edge,
+        p_win=signal.p_win,
+        ask=signal.ask_win,
+        bankroll=bankroll,
+        depth_available=depth,
+        limits=limits,
+    )
+    rounded = round_to_tick(raw, limits.tick_size)
+    if rounded < limits.min_order_size:
+        return _ZERO
+    return rounded
 
 
 def active_bankroll(settings: Settings, paper_balance: Decimal | None = None) -> Decimal:
