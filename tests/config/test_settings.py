@@ -155,6 +155,14 @@ class TestValidators:
         with pytest.raises(ValueError, match="> 0"):
             _make(paper_starting_balance="0")
 
+    def test_book_persist_mode_invalid_rejected(self) -> None:
+        with pytest.raises(ValueError, match="changes"):
+            _make(book_persist_mode="weird")
+
+    def test_book_sample_ms_zero_rejected(self) -> None:
+        with pytest.raises(ValueError, match="> 0"):
+            _make(book_sample_ms="0")
+
 
 class TestSizingDefaults:
     def test_new_sizing_defaults(self) -> None:

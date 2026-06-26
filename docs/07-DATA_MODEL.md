@@ -87,6 +87,24 @@ CREATE TABLE equity_curve (
 - Recorder fase 0 boleh tulis ke Parquet untuk backtest cepat.
 - Index: `book_snapshots(round_no, ts)`, `signals(round_no, ts)`.
 
+### 7.3.1 Retensi `book_snapshots` (Fase 1) — write-time throttling
+Order book in-memory tetap di-update penuh tiap event; hanya PERSISTENSI yang
+di-throttle agar soak readonly tidak meledakkan disk (~6 GB/hari → ratusan
+MB/hari). Skema kolom TIDAK berubah (tanpa migrasi). Aturan (per token/ronde):
+- **Selalu** tulis bila `best_bid`/`best_ask` (harga) berubah, atau snapshot
+  pertama token, atau snapshot terakhir (penanda penutup).
+- Bila best sama (hanya jitter depth) → maks 1 baris/token per `BOOK_SAMPLE_MS`.
+- Fine-grain: bila `window_end - now <= BOOK_FINEGRAIN_SEC` → throttle OFF
+  (resolusi penuh saat fase aksi strategi akhir-window).
+- Mode `BOOK_PERSIST_MODE=all` → tanpa throttle (regresi perilaku lama).
+
+**Implikasi ke G1 (kalibrasi):** densitas data tidak seragam — tinggi saat
+harga bergerak & di akhir-window (45 dtk terakhir), rendah saat tenang. Saat
+membaca series untuk kalibrasi/backtest, perlakukan tiap baris sebagai
+"berlaku sampai baris berikutnya" (step/last-value-carried-forward), JANGAN
+asumsikan interval sampling tetap. best_bid/ask over time + likuiditas + tail
+window tetap utuh; jitter depth menengah sengaja dijatuhkan.
+
 
 
 ---

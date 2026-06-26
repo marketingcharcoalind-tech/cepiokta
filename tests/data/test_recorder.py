@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -12,13 +12,14 @@ from btcbot.adapters.clob_ws import (
     CircuitEvent,
     EventType,
     HttpClobWS,
+    UserUpdate,
     WSConnection,
     WSConnectionClosedError,
 )
 from btcbot.adapters.clock import SimClock
 from btcbot.data.recorder import Recorder
 from btcbot.data.store import Store
-from btcbot.domain.models import Outcome, Round, RoundStatus
+from btcbot.domain.models import BookLevel, OrderBook, Outcome, Round, RoundStatus
 
 WS = datetime(2026, 6, 25, 10, 0, tzinfo=UTC)
 WE = datetime(2026, 6, 25, 10, 5, tzinfo=UTC)
@@ -209,3 +210,138 @@ class TestRecorderConsumeMarket:
         )
         count = await rec.consume_market(48247, ["111"], limit=2)
         assert count == 2
+
+
+# ----- retensi book_snapshots (Fase 1) -----
+
+
+def _book(
+    token: str = "111",
+    *,
+    bid: str = "0.52",
+    ask: str = "0.55",
+    bid_size: str = "100",
+    ask_size: str = "80",
+) -> OrderBook:
+    return OrderBook(
+        token_id=token,
+        ts=WS,
+        bids=[BookLevel(price=Decimal(bid), size=Decimal(bid_size))],
+        asks=[BookLevel(price=Decimal(ask), size=Decimal(ask_size))],
+    )
+
+
+class FakeBookWS:
+    """ClobWS palsu: maju-kan SimClock lalu yield OrderBook terjadwal."""
+
+    def __init__(self, items: list[tuple[OrderBook, float]], clock: SimClock) -> None:
+        self._items = items
+        self._clock = clock
+
+    async def stream_market(self, _token_ids: list[str]) -> AsyncIterator[OrderBook]:
+        for book, advance in self._items:
+            if advance:
+                self._clock.advance(timedelta(seconds=advance))
+            yield book
+
+    def stream_user(self) -> AsyncIterator[UserUpdate]:
+        raise NotImplementedError
+
+
+def _rec(store: Store, ws: object, clock: SimClock, **kw: object) -> Recorder:
+    return Recorder(
+        store,
+        ws,  # type: ignore[arg-type]
+        FakePriceSource(Decimal("64000")),
+        clock,
+        mode="readonly",
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+class TestShouldPersist:
+    async def test_first_always_persists(self, store: Store) -> None:
+        clock = SimClock(WS)
+        rec = _rec(store, HttpClobWS("wss://x"), clock)
+        assert rec._should_persist(_book(), None, clock.now()) is True
+
+    async def test_same_best_within_sample_throttled(self, store: Store) -> None:
+        clock = SimClock(WS)
+        rec = _rec(store, HttpClobWS("wss://x"), clock)
+        rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
+        # depth jitter (best sama), waktu sama → throttle.
+        assert rec._should_persist(_book(bid_size="101"), None, WS) is False
+
+    async def test_same_best_after_sample_persists(self, store: Store) -> None:
+        clock = SimClock(WS)
+        rec = _rec(store, HttpClobWS("wss://x"), clock)
+        rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
+        later = WS + timedelta(milliseconds=1100)
+        assert rec._should_persist(_book(bid_size="101"), None, later) is True
+
+    async def test_best_change_persists_immediately(self, store: Store) -> None:
+        clock = SimClock(WS)
+        rec = _rec(store, HttpClobWS("wss://x"), clock)
+        rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
+        # best berubah (0.52→0.53) walau waktu sama → langsung tulis.
+        assert rec._should_persist(_book(bid="0.53"), None, WS) is True
+
+    async def test_finegrain_window_bypasses_throttle(self, store: Store) -> None:
+        clock = SimClock(WS)
+        rec = _rec(store, HttpClobWS("wss://x"), clock, book_finegrain_sec=45)
+        rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
+        window_end = WS + timedelta(seconds=30)  # time_left 30 <= 45 → fine-grain
+        assert rec._should_persist(_book(bid_size="101"), window_end, WS) is True
+
+    async def test_mode_all_always_persists(self, store: Store) -> None:
+        clock = SimClock(WS)
+        rec = _rec(store, HttpClobWS("wss://x"), clock, book_persist_mode="all")
+        rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
+        assert rec._should_persist(_book(bid_size="101"), None, WS) is True
+
+
+class TestRetentionConsume:
+    async def test_throttle_reduces_writes_first_and_last_saved(self, store: Store) -> None:
+        clock = SimClock(WS)
+        items = [
+            (_book(bid_size="100"), 0.0),
+            (_book(bid_size="101"), 0.2),
+            (_book(bid_size="102"), 0.2),
+            (_book(bid_size="103"), 0.2),  # total 0.6s < 1s, best sama
+        ]
+        rec = _rec(store, FakeBookWS(items, clock), clock)
+        written = await rec.consume_market(48247, ["111"], window_end=WE)  # WE jauh → no fine-grain
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert written == len(snaps)
+        assert len(snaps) == 2  # snapshot pertama + penanda penutup; tengah di-throttle
+        assert snaps[0].bid_depth == Decimal("100")  # pertama tersimpan
+        assert snaps[-1].bid_depth == Decimal("103")  # terakhir tersimpan
+
+    async def test_finegrain_persists_every_update(self, store: Store) -> None:
+        clock = SimClock(WS)
+        items = [(_book(bid_size=str(100 + i)), 0.0) for i in range(3)]  # best sama
+        rec = _rec(store, FakeBookWS(items, clock), clock)
+        window_end = WS + timedelta(seconds=30)  # fine-grain ON
+        await rec.consume_market(48247, ["111"], window_end=window_end)
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert len(snaps) == 3  # semua update tertulis
+
+    async def test_mode_all_writes_everything(self, store: Store) -> None:
+        clock = SimClock(WS)
+        items = [(_book(bid_size=str(100 + i)), 0.0) for i in range(3)]
+        rec = _rec(store, FakeBookWS(items, clock), clock, book_persist_mode="all")
+        await rec.consume_market(48247, ["111"], window_end=WE)
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert len(snaps) == 3
+
+    async def test_best_change_always_written(self, store: Store) -> None:
+        clock = SimClock(WS)
+        items = [
+            (_book(bid="0.52"), 0.0),
+            (_book(bid="0.53"), 0.1),  # best berubah dalam <1s → tetap tulis
+            (_book(bid="0.54"), 0.1),
+        ]
+        rec = _rec(store, FakeBookWS(items, clock), clock)
+        await rec.consume_market(48247, ["111"], window_end=WE)
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert len(snaps) == 3  # tiap perubahan harga tertulis

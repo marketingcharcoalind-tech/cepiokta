@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     max_orders_per_min: int = 30
     stale_ms: int = 1500
 
+    # --- retensi book_snapshots (Fase 1) ---
+    book_persist_mode: str = "changes"  # "changes" (write-on-change+throttle) | "all"
+    book_sample_ms: int = 1000  # throttle: maks 1 baris/token per interval ini
+    book_finegrain_sec: int = 45  # akhir-window: nonaktifkan throttle (resolusi penuh)
+
     # --- paper trading ---
     paper_trading: bool = True
     paper_starting_balance: Decimal = Decimal("200")
@@ -185,6 +190,8 @@ class Settings(BaseSettings):
         "ws_app_ping_seconds",
         "ws_stale_seconds",
         "polygon_rpc_timeout_seconds",
+        "book_sample_ms",
+        "book_finegrain_sec",
     )
     @classmethod
     def _check_positive_int(cls, v: int, info: object) -> int:
@@ -192,6 +199,14 @@ class Settings(BaseSettings):
         if v <= 0:
             field_name = getattr(info, "field_name", "value")
             raise ValueError(f"{field_name} harus > 0, dapat {v}")
+        return v
+
+    @field_validator("book_persist_mode")
+    @classmethod
+    def _check_persist_mode(cls, v: str) -> str:
+        """Mode persistensi book wajib 'changes' atau 'all'."""
+        if v not in {"changes", "all"}:
+            raise ValueError(f"book_persist_mode harus 'changes'|'all', dapat {v!r}")
         return v
 
     @model_validator(mode="after")

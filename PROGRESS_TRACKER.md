@@ -143,6 +143,7 @@ Fase 4 [          ] 0/3     G4: belum
 | 2026-06-26 | WS market: book snapshot = JSON **array** (per token); `price_change` = dict (`price_changes[]`, BUY→bid/SELL→ask, size 0 hapus). Endpoint `/ws/market`. Maintain BookState per asset; best_bid=max(bids), best_ask=min(asks) | fix crash `.get()` pada list; harga live akurat dari order book | — |
 | 2026-06-26 | WS keepalive: server tak balas ping protokol → `ping_interval=None`/`ping_timeout=None` (matikan keepalive library) + heartbeat "PING" aplikasi tiap 10s (task terpisah) + stale 30s → reconnect | fix `1011 keepalive ping timeout` (mati ~45s meski data mengalir); konfig `WS_APP_PING_SECONDS`/`WS_STALE_SECONDS` | — |
 | 2026-06-26 | RPC failover: primary `POLYGON_RPC_URL` (chainstack) + fallbacks publik (publicnode/blastapi/blockpi). UA browser WAJIB (RPC publik 403 tanpa UA). Gagal = exception/HTTP/JSON-RPC/price<=0/stale>120s → endpoint berikutnya; semua gagal → AllRpcFailedError (Δ=None+gap) | RPC tunggal down → bot buta; failover otomatis | — |
+| 2026-06-26 | Retensi book: write-on-change + throttle 1s + fine-grain 45s akhir-window; default `BOOK_PERSIST_MODE=changes`. Order book in-mem tetap penuh; hanya persistensi di-throttle. Schema tetap (tanpa migrasi) | ~333 baris/dtk (~6 GB/hari) mayoritas duplikat depth-jitter → soak berhari/minggu | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)

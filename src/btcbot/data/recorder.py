@@ -18,27 +18,42 @@ from btcbot.adapters.clob_ws import CircuitEvent, EventType
 from btcbot.domain.models import RoundStatus, Signal
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from btcbot.adapters.clob_ws import ClobWS
     from btcbot.adapters.clock import Clock
     from btcbot.data.store import Store
-    from btcbot.domain.models import Outcome, PriceSource, PriceTick, Round
+    from btcbot.domain.models import OrderBook, Outcome, PriceSource, PriceTick, Round
 
 # Event yang menandakan data tidak kontinu → tandai gap.
 _GAP_EVENTS = frozenset({EventType.DISCONNECTED, EventType.STALE, EventType.GAVE_UP})
 
 
+def _best(book: OrderBook) -> tuple[Decimal | None, Decimal | None]:
+    """Best bid (harga tertinggi) & best ask (harga terendah) dari book."""
+    best_bid = book.bids[0].price if book.bids else None
+    best_ask = book.asks[0].price if book.asks else None
+    return best_bid, best_ask
+
+
 class Recorder:
     """Perekam data Fase 0 (readonly).
+
+    Retensi ``book_snapshots`` (Fase 1): order book di adapter tetap di-update
+    penuh; hanya PERSISTENSI yang di-throttle agar volume tulis hemat.
 
     Args:
         store: Persistensi tujuan.
         ws: Stream market CLOB (WSS).
         price_source: Sumber harga Chainlink BTC/USD (PriceSource).
-        clock: Sumber waktu (untuk timestamp gap & time_left).
+        clock: Sumber waktu (untuk timestamp gap, time_left, & throttle).
         mode: Mode operasi yang dicatat (default ``readonly``).
+        book_persist_mode: ``"changes"`` (write-on-change + throttle) | ``"all"``.
+        book_sample_ms: Throttle — maks 1 baris/token per interval ini (ms).
+        book_finegrain_sec: Bila ``window_end - now <= ini`` → throttle OFF.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         store: Store,
         ws: ClobWS,
@@ -46,13 +61,21 @@ class Recorder:
         clock: Clock,
         *,
         mode: str = "readonly",
+        book_persist_mode: str = "changes",
+        book_sample_ms: int = 1000,
+        book_finegrain_sec: int = 45,
     ) -> None:
         self._store = store
         self._ws = ws
         self._price_source = price_source
         self._clock = clock
         self._mode = mode
+        self._persist_mode = book_persist_mode
+        self._sample_ms = book_sample_ms
+        self._finegrain_sec = book_finegrain_sec
         self._pending_gaps: list[CircuitEvent] = []
+        # State retensi per token (untuk satu ronde): (best_bid, best_ask, ts_ms).
+        self._last_persist: dict[str, tuple[Decimal | None, Decimal | None, int]] = {}
 
     # ----- rounds & resolusi -----
 
@@ -140,18 +163,73 @@ class Recorder:
         round_no: int,
         token_ids: list[str],
         *,
+        window_end: datetime | None = None,
         limit: int | None = None,
     ) -> int:
-        """Rekam snapshot orderbook dari WSS sampai stream berhenti atau ``limit``.
+        """Rekam snapshot orderbook dengan retensi write-time (lihat kelas).
 
-        Mengembalikan jumlah snapshot orderbook yang ditulis. Gap (jika ada)
-        di-flush ke DB setelah stream berakhir.
+        Order book di adapter tetap akurat tiap event; di sini hanya keputusan
+        PERSISTENSI yang di-throttle:
+        - selalu tulis bila best_bid/best_ask berubah, atau snapshot pertama;
+        - bila best sama → maks 1 tulis/token per ``book_sample_ms``;
+        - bila ``window_end - now <= book_finegrain_sec`` → throttle OFF;
+        - snapshot TERAKHIR tiap token selalu ditulis (penanda penutup).
+        Mode ``"all"`` → bypass throttle (tulis semua, regresi perilaku lama).
+
+        Mengembalikan jumlah baris yang ditulis. ``limit`` membatasi jumlah
+        update yang dikonsumsi (bukan jumlah tulis).
         """
-        count = 0
+        self._last_persist = {}  # reset state retensi per ronde
+        latest: dict[str, OrderBook] = {}
+        persisted_latest: dict[str, bool] = {}
+        written = 0
+        consumed = 0
+
         async for book in self._ws.stream_market(token_ids):
-            await self._store.insert_book_snapshot(round_no, book, mode=self._mode)
-            count += 1
-            if limit is not None and count >= limit:
+            consumed += 1
+            now = self._clock.now()
+            latest[book.token_id] = book
+            if self._should_persist(book, window_end, now):
+                await self._persist_book(round_no, book, now)
+                persisted_latest[book.token_id] = True
+                written += 1
+            else:
+                persisted_latest[book.token_id] = False
+            if limit is not None and consumed >= limit:
                 break
+
+        # Penanda penutup: pastikan snapshot TERAKHIR tiap token tersimpan.
+        for token, book in latest.items():
+            if not persisted_latest.get(token, False):
+                await self._persist_book(round_no, book, self._clock.now())
+                written += 1
+
         await self.flush_gaps(round_no)
-        return count
+        return written
+
+    def _should_persist(
+        self,
+        book: OrderBook,
+        window_end: datetime | None,
+        now: datetime,
+    ) -> bool:
+        """Putuskan apakah ``book`` perlu ditulis (aturan retensi)."""
+        if self._persist_mode == "all":
+            return True
+        last = self._last_persist.get(book.token_id)
+        if last is None:
+            return True  # snapshot pertama token ini di ronde
+        best_bid, best_ask = _best(book)
+        last_bid, last_ask, last_ms = last
+        if best_bid != last_bid or best_ask != last_ask:
+            return True  # perubahan harga = sinyal penting, jangan di-drop
+        if window_end is not None and (window_end - now).total_seconds() <= self._finegrain_sec:
+            return True  # fine-grain akhir-window → resolusi penuh
+        now_ms = int(now.timestamp() * 1000)
+        return (now_ms - last_ms) >= self._sample_ms  # throttle
+
+    async def _persist_book(self, round_no: int, book: OrderBook, now: datetime) -> None:
+        """Tulis snapshot & perbarui state retensi token."""
+        await self._store.insert_book_snapshot(round_no, book, mode=self._mode)
+        best_bid, best_ask = _best(book)
+        self._last_persist[book.token_id] = (best_bid, best_ask, int(now.timestamp() * 1000))

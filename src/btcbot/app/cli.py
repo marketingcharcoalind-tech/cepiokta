@@ -120,6 +120,7 @@ async def run_readonly(  # noqa: PLR0913
         await recorder.consume_market(
             round_no,
             [meta.token_id_up, meta.token_id_down],
+            window_end=meta.end_time,
             limit=updates_per_round,
         )
 
@@ -167,7 +168,16 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
         timeout_sec=settings.polygon_rpc_timeout_seconds,
         max_staleness_sec=settings.chainlink_max_staleness_sec,
     )
-    recorder = Recorder(store, ws, price_source, clock, mode=str(settings.mode))
+    recorder = Recorder(
+        store,
+        ws,
+        price_source,
+        clock,
+        mode=str(settings.mode),
+        book_persist_mode=settings.book_persist_mode,
+        book_sample_ms=settings.book_sample_ms,
+        book_finegrain_sec=settings.book_finegrain_sec,
+    )
     ws.set_event_sink(recorder.on_circuit_event)
     return store, gamma, recorder
 
