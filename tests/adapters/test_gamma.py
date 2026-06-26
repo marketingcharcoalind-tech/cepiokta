@@ -1,4 +1,4 @@
-"""Unit tests for btcbot.adapters.gamma (real-schema parse, filter, fixture)."""
+"""Unit tests for btcbot.adapters.gamma (slug-based, live-schema fixture)."""
 
 import json
 from datetime import UTC, datetime
@@ -15,172 +15,209 @@ from btcbot.adapters.gamma import (
     GammaError,
     GammaSchemaError,
     HttpGammaClient,
-    is_btc5m_market,
+    is_updown_market,
+    match_updown_slug,
     parse_market,
 )
-from btcbot.domain.models import MarketStatus, Outcome, RoundMeta
+from btcbot.domain.models import MarketStatus, RoundMeta
 
 BASE_URL = "https://gamma.example.test"
-FIXTURE = Path(__file__).parent.parent / "fixtures" / "gamma_btc5m_markets.json"
+FIXTURE = Path(__file__).parent.parent / "fixtures" / "gamma_updown_live_fixture.json"
 
 
 def _markets() -> list[dict[str, Any]]:
     return cast("list[dict[str, Any]]", json.loads(FIXTURE.read_text(encoding="utf-8")))
 
 
-def _btc5m_open() -> dict[str, Any]:
+def _btc5m() -> dict[str, Any]:
     return _markets()[0]
 
 
-def _btc5m_resolved() -> dict[str, Any]:
+def _btc5m_next() -> dict[str, Any]:
     return _markets()[1]
 
 
-def _eth_1h() -> dict[str, Any]:
+def _eth15m() -> dict[str, Any]:
     return _markets()[2]
 
 
-def _btc_yesno() -> dict[str, Any]:
+def _yesno() -> dict[str, Any]:
     return _markets()[3]
 
 
+class TestSlugRegex:
+    def test_btc_5m_matches(self) -> None:
+        assert match_updown_slug("btc-updown-5m-1782472800") == ("btc", "5m", 1782472800)
+
+    def test_eth_15m_matches(self) -> None:
+        assert match_updown_slug("eth-updown-15m-1782473400") == ("eth", "15m", 1782473400)
+
+    def test_yesno_rejected(self) -> None:
+        assert match_updown_slug("will-bitcoin-reach-200k-2026") is None
+
+    def test_epoch_not_multiple_rejected(self) -> None:
+        # 100 bukan kelipatan 300 → sanity gagal.
+        assert match_updown_slug("btc-updown-5m-100") is None
+
+    def test_15m_non_multiple_rejected(self) -> None:
+        assert match_updown_slug("btc-updown-15m-1782472800") is None  # bukan kelipatan 900
+
+
+class TestIsUpdownMarket:
+    def test_btc5m_matches_btc5m(self) -> None:
+        assert is_updown_market(_btc5m(), "btc", "5m") is True
+
+    def test_btc5m_rejected_for_eth(self) -> None:
+        assert is_updown_market(_btc5m(), "eth", "5m") is False
+
+    def test_btc5m_rejected_for_15m(self) -> None:
+        assert is_updown_market(_btc5m(), "btc", "15m") is False
+
+    def test_eth15m_matches(self) -> None:
+        assert is_updown_market(_eth15m(), "eth", "15m") is True
+
+    def test_yesno_rejected(self) -> None:
+        assert is_updown_market(_yesno(), "btc", "5m") is False
+
+
 class TestParseMarket:
-    def test_maps_all_domain_fields(self) -> None:
-        meta = parse_market(_btc5m_open())
+    def test_core_fields(self) -> None:
+        meta = parse_market(_btc5m())
         assert isinstance(meta, RoundMeta)
-        assert meta.market_id == "512345"
-        assert meta.condition_id.startswith("0xaaa")
-        assert meta.slug == "bitcoin-up-or-down-june-25-7pm-et"
-        assert meta.start_time == datetime(2026, 6, 25, 19, 0, tzinfo=UTC)
-        assert meta.end_time == datetime(2026, 6, 25, 19, 5, tzinfo=UTC)
+        assert meta.market_id == "901001"
+        assert meta.condition_id.startswith("0xbtc5m")
+        assert meta.slug == "btc-updown-5m-1782472800"
+        assert meta.asset == "btc"
+        assert meta.timeframe == "5m"
         assert meta.tick_size == Decimal("0.01")
         assert meta.min_order_size == Decimal("5")
         assert meta.status is MarketStatus.OPEN
         assert meta.outcome is None
 
-    def test_token_ids_not_swapped(self) -> None:
-        meta = parse_market(_btc5m_open())
-        # outcomes=[Up,Down] → token[0]=UP, token[1]=DOWN
-        assert meta.token_id_up.startswith("71321045679")
-        assert meta.token_id_down.startswith("52114319501")
+    def test_window_from_event_start_not_listing_date(self) -> None:
+        meta = parse_market(_btc5m())
+        # window_start dari eventStartTime (26 Jun 11:55), BUKAN startDate (25 Jun).
+        assert meta.start_time == datetime(2026, 6, 26, 11, 55, tzinfo=UTC)
+        assert meta.end_time == datetime(2026, 6, 26, 12, 0, tzinfo=UTC)
+        # durasi window benar = 5 menit
+        assert (meta.end_time - meta.start_time).total_seconds() == 300
+        # startDate (listing) TIDAK dipakai
+        assert meta.start_time != datetime(2026, 6, 25, 12, 0, tzinfo=UTC)
 
-    def test_times_parsed_utc(self) -> None:
-        meta = parse_market(_btc5m_open())
-        assert meta.start_time.tzinfo is not None
-        assert meta.start_time.utcoffset() is not None
+    def test_token_up_down_not_swapped(self) -> None:
+        meta = parse_market(_btc5m())
+        # outcomes[0]=Up → clobTokenIds[0]; outcomes[1]=Down → clobTokenIds[1]
+        assert meta.token_id_up.startswith("11111")
+        assert meta.token_id_down.startswith("22222")
 
-    def test_resolved_status_and_outcome(self) -> None:
-        meta = parse_market(_btc5m_resolved())
-        assert meta.status is MarketStatus.RESOLVED
-        assert meta.outcome is Outcome.UP  # outcomePrices ["1","0"] → Up menang
+    def test_resolution_source(self) -> None:
+        meta = parse_market(_btc5m())
+        assert meta.resolution_source == "https://data.chain.link/streams/btc-usd"
 
-    def test_decimal_types(self) -> None:
-        meta = parse_market(_btc5m_open())
-        assert isinstance(meta.tick_size, Decimal)
-        assert isinstance(meta.min_order_size, Decimal)
+    def test_fee_parsed(self) -> None:
+        meta = parse_market(_btc5m())
+        assert meta.fees_enabled is True
+        assert meta.fee_type == "crypto_fees_v2"
+        assert meta.fee_schedule is not None
+        assert meta.fee_schedule.exponent == 2
+        assert meta.fee_schedule.rate == Decimal("0.0006")
+        assert meta.fee_schedule.taker_only is True
+        assert meta.fee_schedule.rebate_rate == Decimal("0.0001")
 
-    def test_missing_required_field_raises_clear_error(self) -> None:
-        data = _btc5m_open()
+    def test_closed_status(self) -> None:
+        data = _btc5m()
+        data["closed"] = True
+        assert parse_market(data).status is MarketStatus.CLOSED
+
+    def test_non_updown_slug_raises(self) -> None:
+        with pytest.raises(GammaSchemaError, match="up/down"):
+            parse_market(_yesno())
+
+    def test_missing_required_field_raises(self) -> None:
+        data = _btc5m()
         del data["conditionId"]
         with pytest.raises(GammaSchemaError, match="conditionId"):
             parse_market(data)
 
-    def test_missing_token_ids_raises(self) -> None:
-        data = _btc5m_open()
-        del data["clobTokenIds"]
-        with pytest.raises(GammaSchemaError, match="clobTokenIds"):
+    def test_missing_min_order_size_raises(self) -> None:
+        data = _btc5m()
+        del data["orderMinSize"]
+        with pytest.raises(GammaSchemaError, match="orderMinSize"):
             parse_market(data)
 
-    def test_non_up_down_outcomes_rejected(self) -> None:
-        with pytest.raises(GammaSchemaError, match="Up/Down"):
-            parse_market(_btc_yesno())
-
-    def test_bad_json_array_raises(self) -> None:
-        data = _btc5m_open()
-        data["outcomes"] = "not-json"
-        with pytest.raises(GammaSchemaError, match="outcomes"):
+    def test_fee_schedule_missing_subfield_raises(self) -> None:
+        data = _btc5m()
+        del data["feeSchedule"]["rate"]
+        with pytest.raises(GammaSchemaError, match="rate"):
             parse_market(data)
 
-    def test_non_iso_date_raises(self) -> None:
-        data = _btc5m_open()
-        data["endDate"] = "25/06/2026"
-        with pytest.raises(GammaSchemaError, match="endDate"):
-            parse_market(data)
+    def test_window_start_fallback_when_no_event_start(self) -> None:
+        data = _btc5m()
+        del data["eventStartTime"]
+        del data["endDate"]  # paksa fallback epoch utk end juga
+        meta = parse_market(data)
+        # epoch=1782472800 → end; start = epoch - 300
+        assert meta.end_time == datetime.fromtimestamp(1782472800, tz=UTC)
+        assert meta.start_time == datetime.fromtimestamp(1782472800 - 300, tz=UTC)
 
 
-class TestFilter:
-    def test_btc5m_passes(self) -> None:
-        assert is_btc5m_market(_btc5m_open()) is True
-        assert is_btc5m_market(_btc5m_resolved()) is True
-
-    def test_eth_1h_rejected(self) -> None:
-        # outcomes Up/Down tapi durasi 1 jam → ditolak (bukan 5m).
-        assert is_btc5m_market(_eth_1h()) is False
-
-    def test_yesno_rejected(self) -> None:
-        assert is_btc5m_market(_btc_yesno()) is False
-
-    def test_non_btc_rejected_even_if_5m(self) -> None:
-        data = _btc5m_open()
-        data["slug"] = "ethereum-up-or-down-x"
-        data["question"] = "Ethereum Up or Down?"
-        assert is_btc5m_market(data) is False
-
-    def test_missing_dates_returns_false_not_crash(self) -> None:
-        data = _btc5m_open()
-        del data["startDate"]
-        assert is_btc5m_market(data) is False
+async def _no_sleep(_s: float) -> None:
+    return None
 
 
 class TestHttpGammaClient:
     @respx.mock
-    async def test_discover_rounds_filters_btc5m_only(self) -> None:
+    async def test_discover_rounds_btc5m_only(self) -> None:
         respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        async with HttpGammaClient(BASE_URL, page_limit=100) as client:
+        async with HttpGammaClient(BASE_URL, asset="btc", timeframe="5m") as client:
             rounds = await client.discover_rounds()
-        # Hanya 2 market BTC 5m (open + resolved) yang lolos.
-        assert len(rounds) == 2
-        assert {r.market_id for r in rounds} == {"512345", "512300"}
+        assert {r.market_id for r in rounds} == {"901001", "901002"}
+        assert all(r.asset == "btc" and r.timeframe == "5m" for r in rounds)
 
     @respx.mock
-    async def test_discover_active_round_picks_window_now(self) -> None:
+    async def test_discover_rounds_eth15m(self) -> None:
         respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        # now di dalam window 19:00-19:05 → pilih market 512345.
-        clock = SimClock(datetime(2026, 6, 25, 19, 2, tzinfo=UTC))
-        async with HttpGammaClient(BASE_URL, clock=clock) as client:
-            active = await client.discover_active_round()
-        assert active.market_id == "512345"
-        assert active.status is MarketStatus.OPEN
+        async with HttpGammaClient(BASE_URL, asset="eth", timeframe="15m") as client:
+            rounds = await client.discover_rounds()
+        assert [r.market_id for r in rounds] == ["902001"]
 
     @respx.mock
-    async def test_discover_active_round_picks_upcoming(self) -> None:
+    async def test_query_uses_end_date_window(self) -> None:
+        route = respx.get(f"{BASE_URL}/markets").mock(
+            return_value=httpx.Response(200, json=_markets())
+        )
+        clock = SimClock(datetime(2026, 6, 26, 11, 57, tzinfo=UTC))
+        async with HttpGammaClient(BASE_URL, clock=clock, timeframe="5m") as client:
+            await client.discover_rounds()
+        params = route.calls[0].request.url.params
+        assert params.get("end_date_min") == "2026-06-26T11:57:00Z"
+        assert params.get("end_date_max") == "2026-06-26T12:09:00Z"  # +12 menit
+        assert params.get("closed") == "false"
+
+    @respx.mock
+    async def test_active_round_in_window(self) -> None:
         respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        # now sebelum semua window → pilih yang terdekat akan datang (18:55).
-        clock = SimClock(datetime(2026, 6, 25, 18, 0, tzinfo=UTC))
-        async with HttpGammaClient(BASE_URL, clock=clock) as client:
+        # 11:57 ∈ [11:55, 12:00) → market 901001
+        clock = SimClock(datetime(2026, 6, 26, 11, 57, tzinfo=UTC))
+        async with HttpGammaClient(BASE_URL, clock=clock, timeframe="5m") as client:
             active = await client.discover_active_round()
-        assert active.market_id == "512300"
+        assert active.market_id == "901001"
+
+    @respx.mock
+    async def test_active_round_next_when_between(self) -> None:
+        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
+        # 11:50 sebelum semua window → pilih terdekat akan datang (901001 @ 11:55)
+        clock = SimClock(datetime(2026, 6, 26, 11, 50, tzinfo=UTC))
+        async with HttpGammaClient(BASE_URL, clock=clock, timeframe="5m") as client:
+            active = await client.discover_active_round()
+        assert active.market_id == "901001"
 
     @respx.mock
     async def test_no_rounds_raises(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=[_btc_yesno()]))
-        async with HttpGammaClient(BASE_URL) as client:
-            with pytest.raises(GammaError, match="tidak ada"):
+        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=[_yesno()]))
+        async with HttpGammaClient(BASE_URL, timeframe="5m") as client:
+            with pytest.raises(GammaError, match="tidak ada ronde"):
                 await client.discover_active_round()
-
-    @respx.mock
-    async def test_pagination_accumulates(self) -> None:
-        page0 = [_btc5m_open()] * 100  # penuh → minta halaman berikutnya
-        page1 = [_btc5m_resolved()]
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            offset = request.url.params.get("offset")
-            return httpx.Response(200, json=page0 if offset == "0" else page1)
-
-        respx.get(f"{BASE_URL}/markets").mock(side_effect=handler)
-        async with HttpGammaClient(BASE_URL, page_limit=100) as client:
-            rounds = await client.discover_rounds()
-        assert len(rounds) == 101
 
     @respx.mock
     async def test_rate_limit_backoff_then_success(self) -> None:
@@ -190,24 +227,21 @@ class TestHttpGammaClient:
             calls["n"] += 1
             if calls["n"] == 1:
                 return httpx.Response(429)
-            return httpx.Response(200, json=[_btc5m_open()])
+            return httpx.Response(200, json=_markets())
 
         respx.get(f"{BASE_URL}/markets").mock(side_effect=handler)
-
-        async def _no_sleep(_s: float) -> None:
-            return None
-
-        async with HttpGammaClient(BASE_URL, sleep=_no_sleep, max_retries=3) as client:
+        async with HttpGammaClient(BASE_URL, sleep=_no_sleep, timeframe="5m") as client:
             rounds = await client.discover_rounds()
-        assert calls["n"] == 2  # 429 lalu sukses
-        assert len(rounds) == 1
+        assert calls["n"] == 2
+        assert len(rounds) == 2
 
     @respx.mock
     async def test_get_market_by_condition_id(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(
-            return_value=httpx.Response(200, json=[_btc5m_resolved()])
-        )
+        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=[_btc5m()]))
         async with HttpGammaClient(BASE_URL) as client:
-            meta = await client.get_market("0xbbb")
-        assert meta.market_id == "512300"
-        assert meta.outcome is Outcome.UP
+            meta = await client.get_market(_btc5m()["conditionId"])
+        assert meta.market_id == "901001"
+
+    async def test_invalid_timeframe_rejected(self) -> None:
+        with pytest.raises(ValueError, match="timeframe"):
+            HttpGammaClient(BASE_URL, timeframe="1h")

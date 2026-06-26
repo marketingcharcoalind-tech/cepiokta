@@ -181,12 +181,30 @@ class PriceSource(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class FeeSchedule:
+    """Jadwal biaya market (Gamma ``feeSchedule``, mis. ``crypto_fees_v2``).
+
+    Formula konkret di-reverse-engineer pada Fase 1 (lihat net_edge). Untuk
+    sekarang nilai mentah disimpan apa adanya agar bisa dianalisis.
+    """
+
+    exponent: int
+    rate: Decimal
+    taker_only: bool
+    rebate_rate: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class RoundMeta:
     """Metadata ronde hasil discovery Gamma (sebelum diperkaya start_price).
 
     Berbeda dari :class:`Round`: tidak memuat ``round_no`` maupun
     ``start_price`` (keduanya ditambahkan di lapisan app/Fase 1 — round_no
     diturunkan dari jadwal, start_price dari Chainlink saat window dibuka).
+
+    Catatan window: ``start_time``/``end_time`` dihitung dari **slug epoch**
+    (= waktu resolusi/endDate) dan ``eventStartTime`` — BUKAN dari ``startDate``
+    (tanggal listing ~24 jam sebelumnya).
     """
 
     market_id: str
@@ -200,6 +218,13 @@ class RoundMeta:
     min_order_size: Decimal
     status: MarketStatus
     outcome: Outcome | None = None
+    # --- field tambahan (temuan data live) ---
+    asset: str = ""  # mis. "btc", "eth"
+    timeframe: str = ""  # "5m" | "15m"
+    resolution_source: str | None = None  # mis. Chainlink Data Streams URL
+    fees_enabled: bool = False
+    fee_type: str | None = None  # mis. "crypto_fees_v2"
+    fee_schedule: FeeSchedule | None = None
 
 
 def round_from_meta(meta: RoundMeta, *, round_no: int, start_price: Decimal) -> Round:

@@ -3,3 +3,11 @@ venv/
 __pycache__/
 *.pyc
 data/*.json
+
+# --- housekeeping (diagnostics & scratch) ---
+diag*.py
+diag*.out
+*.db
+*_scratch/
+# Root-level live capture scratch (fixture yang DIPAKAI test ada di tests/fixtures/ & tetap di-track)
+/gamma_updown_live_fixture.json

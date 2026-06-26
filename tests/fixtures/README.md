@@ -1,18 +1,27 @@
 # Test fixtures
 
-## `gamma_btc5m_markets.json`
+## `gamma_updown_live_fixture.json`
 
 Sample respons Gamma `/markets` (array market) untuk **snapshot schema** test
 parser `adapters/gamma.py`. Berisi 4 market:
 
-1. **BTC Up/Down 5m, OPEN** — harus lolos filter & ter-parse (status OPEN).
-2. **BTC Up/Down 5m, RESOLVED** — outcomePrices `["1","0"]` → outcome UP.
-3. **ETH Up/Down 1 jam** — ditolak filter (durasi ≠ 5m).
-4. **BTC Yes/No (long-term)** — ditolak filter (outcomes bukan Up/Down).
+1. **btc-updown-5m**, OPEN, window 11:55→12:00 (in-window/next-round test).
+2. **btc-updown-5m** (epoch +300), OPEN, window 12:00→12:05.
+3. **eth-updown-15m**, OPEN (uji filter asset/timeframe).
+4. **Yes/No long-dated** (`will-bitcoin-reach-200k-2026`) — ditolak (bukan slug up/down).
 
-> ⚠️ **Disusun dari skema yang DIDOKUMENTASIKAN** Gamma Markets API (camelCase,
-> array ber-JSON pada `outcomes`/`clobTokenIds`/`outcomePrices`). Lingkungan
-> dev saat ini berada di balik proxy TLS-intercepting sehingga capture respons
-> live belum dapat dilakukan. **TODO (B3):** ganti dengan capture respons live
-> sekali (mis. `scripts/read_chainlink_price.py` versi Gamma) agar regresi
-> schema terkunci 1:1 dengan produksi.
+Karakteristik penting yang diuji (temuan data live, diverifikasi VPS):
+- Identifikasi via **slug** regex `^(asset)-updown-(5m|15m)-(epoch)$`, bukan teks judul.
+- `epoch` = waktu resolusi = `endDate` = `window_end`; sanity kelipatan 300/900.
+- `window_start` dari `eventStartTime` — **bukan** `startDate` (tanggal listing
+  ~24 jam sebelumnya; `startDate` sengaja diisi 25 Jun untuk membuktikan tidak dipakai).
+- `clobTokenIds` sejajar index dengan `outcomes` (Up/Down tidak tertukar).
+- `feeSchedule {exponent, rate, takerOnly, rebateRate}`, `feesEnabled`, `feeType`.
+- `resolutionSource` = Chainlink **Data Streams**.
+
+> ⚠️ **CATATAN KEJUJURAN:** file capture live yang dijanjikan
+> (`tests/fixtures/gamma_updown_live_fixture.json`) tiba dalam keadaan **kosong
+> (`[]`)** saat `git pull`. Record di sini **direkonstruksi presisi dari temuan
+> data live yang diverifikasi di VPS** (tercantum di task B3). **TODO:** ganti
+> dengan capture mentah 1:1 dari Gamma saat akses jaringan non-proxy tersedia,
+> agar regresi schema benar-benar terkunci ke respons produksi.

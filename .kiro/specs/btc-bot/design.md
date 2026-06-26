@@ -5,11 +5,12 @@ Arsitektur berlapis: Adapters (I/O) → Domain (murni) → Exec/Risk → App.
 Detail penuh: /docs/02-ARCHITECTURE.md & /docs/08-MODULE_SPECS.md.
 
 ## Components
-- **Adapters**: clock, gamma (REST discovery → RoundMeta; filter struktural
-  BTC 5m via outcomes Up/Down + durasi window 300s; pagination + backoff),
-  clob (REST+signing), clob_ws (market+user WSS), chainlink (price truth:
-  ChainlinkDataFeed via eth_call, read-only; di balik PriceSource Protocol
-  agar Data Streams bisa menyusul).
+- **Adapters**: clock, gamma (REST discovery → RoundMeta; identifikasi market
+  via **slug** `asset-updown-(5m|15m)-epoch`; window dari eventStartTime/endDate
+  bukan startDate; query jendela end_date + UA browser; parse fee `crypto_fees_v2`
+  & resolutionSource=Chainlink Data Streams), clob (REST+signing), clob_ws
+  (market+user WSS), chainlink (price truth: ChainlinkDataFeed via eth_call,
+  read-only; PriceSource Protocol; Data Streams menyusul di B2b).
 - **Domain (murni)**: market (interval-loader), signal (trend/edge), strategy
   (entry/hedge/exit).
 - **Exec**: sizing (fractional Kelly+caps), oms (order mgmt, paper/live).

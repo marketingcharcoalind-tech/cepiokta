@@ -127,13 +127,18 @@ Fase 4 [          ] 0/3     G4: belum
 | # | Deskripsi | Sejak | Dampak | Rencana | Status |
 |---|-----------|-------|--------|---------|--------|
 | B1 | Endpoint CLOB V2 (REST/WSS) & skema pesan belum diverifikasi | 2026-06-25 | blokir Fase 3 (live) | cek docs resmi Polymarket (docs/04 §4.8) | 🟦 |
+| B2b | Adapter Chainlink **Data Streams** BTC/USD (akurasi harga akhir-window) | 2026-06-25 | akurasi resolusi/edge; sumber resolusi asli market | bangun di Fase 1 (lihat task lanjutan) | 🟦 |
+| F1-fee | Reverse-engineer formula `crypto_fees_v2` → masukkan ke net_edge | 2026-06-25 | market berbiaya; edge harus net setelah fee | Fase 1 (signal/sizing) | 🟦 |
 | B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity | ✅ |
-| B3 | Gamma discovery — schema diimplementasikan (RoundMeta + filter durasi 5m) | 2026-06-25 | live capture fixture masih TODO (proxy TLS dev) | parse real schema + fixture; capture live sekali saat akses tersedia | 🟦 |
+| B3 | Gamma discovery — RESOLVED (slug-based + window benar + fee parsed) | 2026-06-25 | — | regex slug `asset-updown-tf-epoch`; window dari eventStartTime/endDate (bukan startDate); query end_date window + UA browser | ✅ |
 
 ## 🧠 Decision Log (ADR ringkas)
 | Tgl | Keputusan | Alasan | ADR file |
 |-----|-----------|--------|----------|
-| | (contoh) Pakai Python + asyncio | iterasi cepat, latensi cukup | docs/adr/0001-language.md |
+| 2026-06-25 | Gamma discovery berbasis **slug** `asset-updown-tf-epoch`, bukan teks judul/durasi startDate | startDate = tanggal listing (~24j sebelum) → bug filter durasi lama menolak semua ronde; epoch slug = window_end andal | — |
+| 2026-06-25 | Market up/down 5m/15m **BERBIAYA**: `feesEnabled=true`, `feeType=crypto_fees_v2`, `feeSchedule{exponent,rate,takerOnly,rebateRate}` di-parse ke model | net_edge wajib memperhitungkan fee (Fase 1) | — |
+| 2026-06-25 | Resolusi market via **Chainlink Data Streams** (`resolutionSource`), bukan Data Feeds | basis-risk: sumber harga akhir-window harus = sumber resolusi (B2b) | — |
+| 2026-06-25 | `outcomePrices` Gamma **STALE** untuk market cepat → tidak dipakai sbg harga | harga live dari order book CLOB | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)
