@@ -50,7 +50,7 @@
 | 1.2 | Signal engine (edge math) | domain/signal.py | ✅ | ✅ | 2026-06-27 | SignalEngine.compute (Δ,sigma_left,z,p_win=Φ(\|z\|),ask_win,net_edge); FeeModel pluggable (domain/fees.py, crypto_fees_v2 7% default) + FEE_RATE setting; net-of-fee; 28 test |
 | 1.3 | Strategy (entry/hedge/exit) | domain/strategy.py | ✅ | ✅ | 2026-06-27 | on_tick→Decision (EnterOrder/Hedge/Exit/NoOp); filter T_ENTRY/Δ/price-band/MIN_EDGE; hedge p_win<P_EXIT‖flip≥FLIP_RATIO; never-fade; +P_EXIT setting; 24 test |
 | 1.4 | Sizing (Kelly + caps) | exec/sizing.py | ✅ | ✅ | 2026-06-27 | `size(signal,…)→Decimal` pakai net_edge net-of-fee + round_to_tick + min_order; refactor `_capped_size` (compute_size tetap); 720+ invariant cases |
-| 1.5 | Replay engine + fill model | backtest/replay.py | ⬜ | ⬜ | | |
+| 1.5 | Replay engine + fill model | backtest/replay.py | ✅ | ✅ | 2026-06-27 | SimClock→SignalEngine→Strategy→Sizer→fill model; FOK/FAK level-walk slippage + fee7% + latency + kompetisi; settle label Gamma; reconstruct_ticks(LVCF)+run_and_persist(mode=backtest); deterministik; 19 test |
 | 1.6 | Laporan metrik & kalibrasi | backtest reporting | ⬜ | ⬜ | | |
 
 **GATE G1 — KEPUTUSAN EDGE (paling kritikal):**
@@ -115,7 +115,7 @@
 ## 📊 Status Ringkas (isi cepat)
 ```
 Fase 0 [##########] 8/8     G0: ✅ LULUS (replay fixture)
-Fase 1 [#####     ] 5/6     G1: belum   (edge terbukti? belum) — interval-loader + signal + strategy + sizing done
+Fase 1 [#####     ] 5/6     G1: belum   (edge terbukti? belum) — interval-loader + signal + strategy + sizing + replay done; tinggal 1.6 laporan
 Fase 2 [          ] 0/4     G2: belum
 Fase 3 [          ] 0/5     G3: belum
 Fase 4 [          ] 0/3     G4: belum

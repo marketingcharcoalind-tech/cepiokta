@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     paper_trading: bool = True
     paper_starting_balance: Decimal = Decimal("200")
 
+    # --- backtest / replay (Fase 1) ---
+    backtest_seed: int = 42
+    backtest_latency_ticks: int = 1  # keputusan di tick t → fill di tick t+latency
+    backtest_competition_fraction: Decimal = Decimal("0")  # [0,1): surplus depth saja
+    backtest_vol_per_sqrt_sec: Decimal = Decimal("5")  # TODO calibrate G1 (realized vol)
+
     # --- infra ---
     db_url: str = "sqlite+aiosqlite:///./btcbot.db"
     log_level: str = "INFO"
@@ -221,6 +227,30 @@ class Settings(BaseSettings):
         """Fee taker wajib di rentang [0, 1) (0 hanya untuk ablation)."""
         if not (Decimal("0") <= v < Decimal("1")):
             raise ValueError(f"fee_rate harus di [0, 1), dapat {v}")
+        return v
+
+    @field_validator("backtest_competition_fraction")
+    @classmethod
+    def _check_competition_fraction(cls, v: Decimal) -> Decimal:
+        """Fraksi kompetisi wajib di rentang [0, 1)."""
+        if not (Decimal("0") <= v < Decimal("1")):
+            raise ValueError(f"backtest_competition_fraction harus di [0, 1), dapat {v}")
+        return v
+
+    @field_validator("backtest_vol_per_sqrt_sec")
+    @classmethod
+    def _check_backtest_vol(cls, v: Decimal) -> Decimal:
+        """Volatilitas backtest tidak boleh negatif."""
+        if v < Decimal("0"):
+            raise ValueError(f"backtest_vol_per_sqrt_sec tidak boleh negatif, dapat {v}")
+        return v
+
+    @field_validator("backtest_latency_ticks")
+    @classmethod
+    def _check_latency(cls, v: int) -> int:
+        """Latensi (tick) tidak boleh negatif."""
+        if v < 0:
+            raise ValueError(f"backtest_latency_ticks tidak boleh negatif, dapat {v}")
         return v
 
     @model_validator(mode="after")

@@ -323,6 +323,23 @@ class Store:
             resolved_outcome=_opt_outcome(row["resolved_outcome"]),
         )
 
+    async def get_resolved_rounds(self, *, limit: int | None = None) -> list[Round]:
+        """Ronde yang sudah resolved (``status='resolved'`` & outcome ada), terurut.
+
+        Dipakai backtest/replay (Fase 1) sebagai sumber ronde berlabel Gamma.
+        """
+        sql = (
+            "SELECT * FROM rounds WHERE status = 'resolved' "
+            "AND resolved_outcome IS NOT NULL ORDER BY round_no"
+        )
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        async with self._conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [self._row_to_round(row) for row in rows]
+
     async def get_unresolved_rounds(
         self, before: datetime, *, limit: int | None = None
     ) -> list[Round]:
