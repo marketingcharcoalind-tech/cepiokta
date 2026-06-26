@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     min_edge: Decimal = Decimal("0.01")
     flip_ratio: Decimal = Decimal("0.90")
     hedge_fraction: Decimal = Decimal("0.5")
+    p_exit: Decimal = Decimal("0.65")  # hedge/exit bila p_win sisi held < ini
     # Fee taker crypto_fees_v2 (terverifikasi ~7%); dipakai signal/sizing net-of-fee.
     fee_rate: Decimal = Decimal("0.07")
 
@@ -136,6 +137,7 @@ class Settings(BaseSettings):
         "min_edge",
         "flip_ratio",
         "hedge_fraction",
+        "p_exit",
     )
     @classmethod
     def _check_unit_interval(cls, v: Decimal, info: object) -> Decimal:
