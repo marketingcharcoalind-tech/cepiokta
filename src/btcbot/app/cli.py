@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from btcbot import __version__
-from btcbot.adapters.chainlink import ChainlinkDataFeed, PriceUnavailableError, Web3AggregatorReader
+from btcbot.adapters.chainlink import FailoverPriceSource, PriceUnavailableError
 from btcbot.adapters.clob_ws import HttpClobWS
 from btcbot.adapters.clock import SystemClock
 from btcbot.adapters.gamma import HttpGammaClient
@@ -158,14 +158,13 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
         stale_ms=settings.ws_stale_seconds * 1000,
         app_ping_seconds=settings.ws_app_ping_seconds,
     )
-    reader = Web3AggregatorReader(
-        rpc_url=settings.polygon_rpc_url,
+    reader_endpoints = settings.rpc_endpoints()
+    price_source = FailoverPriceSource.from_endpoints(
+        rpc_urls=reader_endpoints,
         address=settings.chainlink_btcusd_source,
-    )
-    price_source = ChainlinkDataFeed(
-        reader=reader,
         clock=clock,
-        source=f"chainlink:{settings.chainlink_feed_type}:{settings.chainlink_btcusd_source}",
+        source_label=f"chainlink:{settings.chainlink_feed_type}",
+        timeout_sec=settings.polygon_rpc_timeout_seconds,
         max_staleness_sec=settings.chainlink_max_staleness_sec,
     )
     recorder = Recorder(store, ws, price_source, clock, mode=str(settings.mode))

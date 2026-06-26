@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     # --- wallet / chain (SECRET) ---
     polygon_rpc_url: str = ""
+    polygon_rpc_fallbacks: str = ""  # comma-separated; boleh kosong
+    polygon_rpc_timeout_seconds: int = 10
     wallet_private_key: str = ""
     clob_api_key: str = ""
     clob_api_secret: str = ""
@@ -182,6 +184,7 @@ class Settings(BaseSettings):
         "chainlink_max_staleness_sec",
         "ws_app_ping_seconds",
         "ws_stale_seconds",
+        "polygon_rpc_timeout_seconds",
     )
     @classmethod
     def _check_positive_int(cls, v: int, info: object) -> int:
@@ -233,6 +236,21 @@ class Settings(BaseSettings):
         if not raw:
             return []
         return [int(part.strip()) for part in raw.split(",") if part.strip()]
+
+    def rpc_endpoints(self) -> list[str]:
+        """Daftar RPC terurut: primary + fallbacks (buang kosong/duplikat).
+
+        Urutan dipertahankan; duplikat dibuang (de-dup pertama menang).
+        """
+        candidates = [self.polygon_rpc_url, *self.polygon_rpc_fallbacks.split(",")]
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw in candidates:
+            url = raw.strip()
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+        return out
 
 
 @lru_cache(maxsize=1)

@@ -54,6 +54,13 @@
   window tutup.
 - **Basis risk**: gunakan feed Chainlink yang sama untuk prediksi; feed exchange
   (Binance/Coinbase) hanya pelengkap latensi, BUKAN acuan resolusi.
+- **RPC failover** (`adapters/chainlink.py`): baca Data Feeds via daftar RPC
+  terurut `POLYGON_RPC_URL` + `POLYGON_RPC_FALLBACKS`. Endpoint dianggap GAGAL
+  bila exception/timeout/HTTP(403/5xx)/JSON-RPC, `price<=0`, atau data STALE
+  (`now-updatedAt > CHAINLINK_MAX_STALENESS_SEC`) → coba endpoint berikutnya.
+  Semua gagal → `AllRpcFailedError` (Δ=None + gap, tanpa crash). RPC publik
+  (Cloudflare-fronted) menolak tanpa UA browser → semua request kirim header
+  `User-Agent: Mozilla/5.0 ...`.
 - Rekonsiliasi: setelah settle, cocokkan posisi → PnL aktual ke `store.py`.
 
 ## 4.7 Adapter Interface (kontrak ringkas)

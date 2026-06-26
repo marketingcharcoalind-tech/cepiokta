@@ -8,9 +8,12 @@ import pytest
 
 from btcbot.adapters.chainlink import (
     AggregatorRoundData,
+    AllRpcFailedError,
     ChainlinkDataFeed,
+    FailoverPriceSource,
     FakePriceSource,
     PriceUnavailableError,
+    Web3AggregatorReader,
 )
 from btcbot.adapters.clock import SimClock
 from btcbot.domain.models import PriceSource, PriceTick
@@ -178,3 +181,66 @@ class TestFakePriceSource:
         src = FakePriceSource(Decimal("64000"), error=PriceUnavailableError("boom"))
         with pytest.raises(PriceUnavailableError, match="boom"):
             await src.price_now()
+
+
+def _ok_tick(price: str = "64250", *, stale: bool = False, source: str = "ok") -> FakePriceSource:
+    return FakePriceSource(Decimal(price), ts=NOW, source=source, stale=stale)
+
+
+class TestFailoverPriceSource:
+    async def test_first_ok_used(self) -> None:
+        fos = FailoverPriceSource([("a", _ok_tick("64250", source="a"))])
+        tick = await fos.price_now()
+        assert tick.price == Decimal("64250")
+        assert tick.source == "a"
+
+    async def test_connection_error_failover_to_second(self) -> None:
+        bad = FakePriceSource(Decimal("0"), error=PriceUnavailableError("conn refused"))
+        good = _ok_tick("64300", source="b")
+        fos = FailoverPriceSource([("a", bad), ("b", good)])
+        tick = await fos.price_now()
+        assert tick.source == "b"
+        assert tick.price == Decimal("64300")
+
+    async def test_stale_failover_to_second(self) -> None:
+        stale = _ok_tick("64250", stale=True, source="a")
+        good = _ok_tick("64310", source="b")
+        fos = FailoverPriceSource([("a", stale), ("b", good)])
+        tick = await fos.price_now()
+        assert tick.source == "b"
+        assert tick.stale is False
+
+    async def test_price_non_positive_failover(self) -> None:
+        # ChainlinkDataFeed dgn answer<=0 → PriceUnavailableError → failover.
+        bad_feed = _feed(FakeReader(decimals_val=8, data=_data(0)))
+        good = _ok_tick("64320", source="b")
+        fos = FailoverPriceSource([("a", bad_feed), ("b", good)])
+        tick = await fos.price_now()
+        assert tick.source == "b"
+
+    async def test_all_fail_raises_all_rpc_failed(self) -> None:
+        bad1 = FakePriceSource(Decimal("0"), error=PriceUnavailableError("down1"))
+        bad2 = _ok_tick("64250", stale=True, source="b")  # stale = gagal
+        fos = FailoverPriceSource([("a", bad1), ("b", bad2)])
+        with pytest.raises(AllRpcFailedError):
+            await fos.price_now()
+
+    async def test_empty_sources_rejected(self) -> None:
+        with pytest.raises(ValueError, match="minimal satu endpoint"):
+            FailoverPriceSource([])
+
+    async def test_all_rpc_failed_is_price_unavailable(self) -> None:
+        # AllRpcFailedError ⊂ PriceUnavailableError → layer atas (Δ=None) tetap menangani.
+        assert issubclass(AllRpcFailedError, PriceUnavailableError)
+
+
+class TestWeb3ReaderUserAgent:
+    def test_request_kwargs_has_browser_ua(self) -> None:
+        reader = Web3AggregatorReader("https://rpc.example", "0xfeed", timeout_sec=10.0)
+        kwargs = reader._request_kwargs()
+        assert kwargs["headers"]["User-Agent"].startswith("Mozilla/5.0")
+        assert kwargs["timeout"] == 10.0
+
+    def test_empty_rpc_rejected(self) -> None:
+        with pytest.raises(ValueError, match="POLYGON_RPC_URL"):
+            Web3AggregatorReader("", "0xfeed")

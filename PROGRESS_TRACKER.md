@@ -130,7 +130,7 @@ Fase 4 [          ] 0/3     G4: belum
 | B1-ws | CLOB **WS market** parser + keepalive — RESOLVED | 2026-06-26 | — | path `/ws/market`; parse LIST snapshot + `price_change`; keepalive: ping_interval=None + heartbeat "PING" 10s + stale 30s reconnect | ✅ |
 | B2b | Adapter Chainlink **Data Streams** BTC/USD (akurasi harga akhir-window) | 2026-06-25 | akurasi resolusi/edge; sumber resolusi asli market | bangun di Fase 1 (lihat task lanjutan) | 🟦 |
 | F1-fee | Reverse-engineer formula `crypto_fees_v2` → masukkan ke net_edge | 2026-06-25 | market berbiaya; edge harus net setelah fee | Fase 1 (signal/sizing) | 🟦 |
-| B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity | ✅ |
+| B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader + RPC failover) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity; FailoverPriceSource primary+fallbacks, UA browser | ✅ |
 | B3 | Gamma discovery — RESOLVED (slug-based + window benar + fee parsed) | 2026-06-25 | — | regex slug `asset-updown-tf-epoch`; window dari eventStartTime/endDate (bukan startDate); query end_date window + UA browser | ✅ |
 
 ## 🧠 Decision Log (ADR ringkas)
@@ -142,6 +142,7 @@ Fase 4 [          ] 0/3     G4: belum
 | 2026-06-25 | `outcomePrices` Gamma **STALE** untuk market cepat → tidak dipakai sbg harga | harga live dari order book CLOB | — |
 | 2026-06-26 | WS market: book snapshot = JSON **array** (per token); `price_change` = dict (`price_changes[]`, BUY→bid/SELL→ask, size 0 hapus). Endpoint `/ws/market`. Maintain BookState per asset; best_bid=max(bids), best_ask=min(asks) | fix crash `.get()` pada list; harga live akurat dari order book | — |
 | 2026-06-26 | WS keepalive: server tak balas ping protokol → `ping_interval=None`/`ping_timeout=None` (matikan keepalive library) + heartbeat "PING" aplikasi tiap 10s (task terpisah) + stale 30s → reconnect | fix `1011 keepalive ping timeout` (mati ~45s meski data mengalir); konfig `WS_APP_PING_SECONDS`/`WS_STALE_SECONDS` | — |
+| 2026-06-26 | RPC failover: primary `POLYGON_RPC_URL` (chainstack) + fallbacks publik (publicnode/blastapi/blockpi). UA browser WAJIB (RPC publik 403 tanpa UA). Gagal = exception/HTTP/JSON-RPC/price<=0/stale>120s → endpoint berikutnya; semua gagal → AllRpcFailedError (Δ=None+gap) | RPC tunggal down → bot buta; failover otomatis | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)

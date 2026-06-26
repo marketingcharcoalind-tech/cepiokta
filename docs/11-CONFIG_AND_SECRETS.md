@@ -13,6 +13,8 @@ LIVE_CONFIRMED=no             # harus 'yes' untuk live
 
 # --- wallet / chain (SECRET; jangan commit nilai asli) ---
 POLYGON_RPC_URL=
+POLYGON_RPC_FALLBACKS=         # cadangan RPC (comma-separated; UA browser dikirim otomatis)
+POLYGON_RPC_TIMEOUT_SECONDS=10
 WALLET_PRIVATE_KEY=           # SECRET — gunakan secret manager di prod
 CLOB_API_KEY=                 # hasil derive dari signature (CLOB V2)
 CLOB_API_SECRET=

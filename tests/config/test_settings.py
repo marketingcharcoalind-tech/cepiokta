@@ -170,6 +170,26 @@ class TestSizingDefaults:
         assert s.paper_starting_balance == Decimal("200")
 
 
+class TestRpcEndpoints:
+    def test_primary_only(self) -> None:
+        s = _make(polygon_rpc_url="https://primary")
+        assert s.rpc_endpoints() == ["https://primary"]
+
+    def test_primary_plus_fallbacks_order_preserved(self) -> None:
+        s = _make(
+            polygon_rpc_url="https://primary",
+            polygon_rpc_fallbacks="https://a, https://b",
+        )
+        assert s.rpc_endpoints() == ["https://primary", "https://a", "https://b"]
+
+    def test_dedup_and_empty_dropped(self) -> None:
+        s = _make(
+            polygon_rpc_url="https://primary",
+            polygon_rpc_fallbacks="https://primary, ,https://a,https://a",
+        )
+        assert s.rpc_endpoints() == ["https://primary", "https://a"]
+
+
 class TestHelpers:
     def test_allowed_chat_ids_empty(self) -> None:
         s = _make()
