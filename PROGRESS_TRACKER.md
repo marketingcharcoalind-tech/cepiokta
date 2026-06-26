@@ -46,7 +46,7 @@
 ## 🟡 FASE 1 — Backtest / Replay  (Gate G1)
 | Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
 |:------:|-------|-------------|:------:|:-----:|---------|---------|
-| 1.1 | Interval loader | domain/market.py | ⬜ | ⬜ | | |
+| 1.1 | Interval loader | domain/market.py | ✅ | ✅ | 2026-06-27 | pure; aligned_window/round_no_for + IntervalLoader (clock injectable); half-open [start,end); 31 test |
 | 1.2 | Signal engine (edge math) | domain/signal.py | ⬜ | ⬜ | | |
 | 1.3 | Strategy (entry/hedge/exit) | domain/strategy.py | ⬜ | ⬜ | | |
 | 1.4 | Sizing (Kelly + caps) | exec/sizing.py | ✅ | ✅ | 2026-06-25 | dikerjakan di Phase 0.7: KELLY_FRACTION + cap %bankroll/notional/depth |
@@ -115,7 +115,7 @@
 ## 📊 Status Ringkas (isi cepat)
 ```
 Fase 0 [##########] 8/8     G0: ✅ LULUS (replay fixture)
-Fase 1 [#         ] 1/6     G1: belum   (edge terbukti? belum) — sizing done early
+Fase 1 [##        ] 2/6     G1: belum   (edge terbukti? belum) — sizing + interval-loader done
 Fase 2 [          ] 0/4     G2: belum
 Fase 3 [          ] 0/5     G3: belum
 Fase 4 [          ] 0/3     G4: belum
@@ -148,6 +148,7 @@ Fase 4 [          ] 0/3     G4: belum
 | 2026-06-26 | Resolution recorder: Gamma primer (outcomePrices/closed = ground truth) + Chainlink cross-check best-effort; kolom `settlement_price`/`resolution_source` (additive, migrasi idempoten). `resolution_mismatch` di-log (→ B2b). Backfill via `--resolve-backfill` | rounds.resolved_outcome selalu None → data soak tak bisa dikalibrasi | — |
 | 2026-06-26 | Fix resolver Gamma: query resolusi WAJIB `closed=true` (default /markets buang market closed → backfill resolved:0). `outcomes`/`outcomePrices` = JSON-encoded string → json.loads. Resolved hanya bila closed==true DAN outcomePrices definitif (tepat satu ≥0.99, sisanya ≤0.01); uma TIDAK jadi syarat. `fetch_resolved_market(slug|condition_id)` baru | --resolve-backfill selalu lapor resolved:0 | — |
 | 2026-06-26 | **PROMPT_GUIDE.md → v1.2**: injeksi TEMUAN NYATA dari VPS jaringan-bersih (blok ✅ VERIFIED REALITY + callout tiap prompt). Sinkron docs/04,05,06,07,09. Koreksi kritis fee **7% taker** (`crypto_fees_v2`, asumsi zero-fee SALAH) ke semua net_edge/PnL. Docs-only (tanpa ubah src/) | prompt lama belum memuat skema adapter & fee nyata → agent bisa salah asumsi | — |
+| 2026-06-27 | **Koreksi cross-check epoch**: `1782480000` = **13:20:00Z** (window_end), BUKAN 13:25:00Z (summary lama keliru 5 menit). Diverifikasi komputasi. PROMPT_GUIDE + market.py docstring diperbaiki | konvensi window/round_no harus akurat agar interval-loader & scanner benar | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)

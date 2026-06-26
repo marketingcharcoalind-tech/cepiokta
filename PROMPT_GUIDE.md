@@ -36,7 +36,8 @@
 1. **Slug market**: `{asset}-updown-{5m|15m}-{epoch}`
    (mis. `btc-updown-5m-1782480000`). `round_no = epoch` window;
    `round_no % 300 == 0` (5m) / `% 900 == 0` (15m). Cross-check fixture:
-   `1782480000` → `2026-06-26T13:25:00Z`.
+   `1782480000` → `2026-06-26T13:20:00Z` (= `window_end`; `window_start`
+   = `13:15:00Z`).
 2. **Gamma discovery (market hidup)**: `GET /markets?closed=false&active=true`
    lalu filter **regex slug**. **Resolusi (market selesai)**: WAJIB `closed=true`
    (tanpa flag itu hasil selalu kosong → `--resolve-backfill` lapor `resolved:0`).
@@ -249,7 +250,8 @@ Laporkan ringkasan dan update PROGRESS_TRACKER.md (tandai Fase 0 selesai).
 ## PROMPT 1.1 — Interval loader (domain murni)
 > ✅ VERIFIED (lihat VERIFIED REALITY #1): cadence epoch `%300==0` (5m) /
 > `%900==0` (15m); slug `{asset}-updown-{5m|15m}-{epoch}`; cross-check fixture
-> `1782480000` → `2026-06-26T13:25:00Z`.
+> `1782480000` → `2026-06-26T13:20:00Z` (= `window_end`; `window_start` =
+> `13:15:00Z`).
 ```
 Implement src/btcbot/domain/market.py sesuai docs/08 §8.6 & docs/05.
 Deliverable: current_window(now), time_left(now), is_entry_window(now, T_ENTRY_SEC).
