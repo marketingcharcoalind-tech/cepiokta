@@ -146,6 +146,7 @@ Fase 4 [          ] 0/3     G4: belum
 | 2026-06-26 | RPC failover: primary `POLYGON_RPC_URL` (chainstack) + fallbacks publik (publicnode/blastapi/blockpi). UA browser WAJIB (RPC publik 403 tanpa UA). Gagal = exception/HTTP/JSON-RPC/price<=0/stale>120s → endpoint berikutnya; semua gagal → AllRpcFailedError (Δ=None+gap) | RPC tunggal down → bot buta; failover otomatis | — |
 | 2026-06-26 | Retensi book: write-on-change + throttle 1s + fine-grain 45s akhir-window; default `BOOK_PERSIST_MODE=changes`. Order book in-mem tetap penuh; hanya persistensi di-throttle. Schema tetap (tanpa migrasi) | ~333 baris/dtk (~6 GB/hari) mayoritas duplikat depth-jitter → soak berhari/minggu | — |
 | 2026-06-26 | Resolution recorder: Gamma primer (outcomePrices/closed = ground truth) + Chainlink cross-check best-effort; kolom `settlement_price`/`resolution_source` (additive, migrasi idempoten). `resolution_mismatch` di-log (→ B2b). Backfill via `--resolve-backfill` | rounds.resolved_outcome selalu None → data soak tak bisa dikalibrasi | — |
+| 2026-06-26 | Fix resolver Gamma: query resolusi WAJIB `closed=true` (default /markets buang market closed → backfill resolved:0). `outcomes`/`outcomePrices` = JSON-encoded string → json.loads. Resolved hanya bila closed==true DAN outcomePrices definitif (tepat satu ≥0.99, sisanya ≤0.01); uma TIDAK jadi syarat. `fetch_resolved_market(slug|condition_id)` baru | --resolve-backfill selalu lapor resolved:0 | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)

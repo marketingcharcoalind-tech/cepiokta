@@ -1,19 +1,31 @@
 """Unit tests for btcbot.data.resolver (network mocked)."""
 
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
+from typing import Any, cast
 
+import httpx
 import pytest
+import respx
 from structlog.testing import capture_logs
 
 from btcbot.adapters.chainlink import FakePriceSource
 from btcbot.adapters.clock import SimClock
+from btcbot.adapters.gamma import HttpGammaClient
 from btcbot.data.resolver import Resolver
 from btcbot.data.store import Store
 from btcbot.domain.models import Outcome, Round, RoundStatus
 
 NOW = datetime(2026, 6, 26, 13, 0, tzinfo=UTC)
+BASE_URL = "https://gamma.example.test"
+RESOLVED_FIXTURE = Path(__file__).parent.parent / "fixtures" / "gamma_resolved_markets.json"
+
+
+def _resolved_markets() -> dict[str, dict[str, Any]]:
+    return cast("dict[str, dict[str, Any]]", json.loads(RESOLVED_FIXTURE.read_text("utf-8")))
 
 
 @pytest.fixture
@@ -175,3 +187,35 @@ class TestBackfill:
         resolver = Resolver(store, FakeLookup({"0xc": Outcome.UP}), SimClock(NOW))
         assert await resolver.backfill() == 1
         assert await resolver.backfill() == 0  # sudah resolved → tak ada lagi
+
+
+class TestResolverWithGammaClient:
+    """Integrasi: lookup = HttpGammaClient nyata (respx, fixture RESOLVED asli)."""
+
+    @respx.mock
+    async def test_resolve_up_via_gamma(self, store: Store) -> None:
+        market = _resolved_markets()["btc-updown-5m-1782480000"]  # ["1","0"] → UP
+        route = respx.get(f"{BASE_URL}/markets").mock(
+            return_value=httpx.Response(200, json=[market])
+        )
+        rnd = _round(10, market["conditionId"], window_end=NOW - timedelta(hours=1))
+        await store.upsert_round(rnd)
+        resolver = Resolver(store, HttpGammaClient(BASE_URL), SimClock(NOW))
+        assert await resolver.resolve_round(rnd) is True
+        res = await store.get_resolution(10)
+        assert res is not None
+        assert res.resolved_outcome is Outcome.UP
+        assert res.resolution_source == "gamma"
+        assert route.calls[0].request.url.params.get("closed") == "true"
+
+    @respx.mock
+    async def test_resolve_down_via_gamma(self, store: Store) -> None:
+        market = _resolved_markets()["btc-updown-5m-1782477300"]  # ["0","1"] → DOWN
+        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=[market]))
+        rnd = _round(11, market["conditionId"], window_end=NOW - timedelta(hours=1))
+        await store.upsert_round(rnd)
+        resolver = Resolver(store, HttpGammaClient(BASE_URL), SimClock(NOW))
+        await resolver.resolve_round(rnd)
+        res = await store.get_resolution(11)
+        assert res is not None
+        assert res.resolved_outcome is Outcome.DOWN

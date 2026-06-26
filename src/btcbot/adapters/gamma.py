@@ -264,25 +264,24 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# Ambang harga outcome pemenang (token settle ke $1).
-_WINNER_PRICE = Decimal("0.999")
+# Ambang harga outcome pemenang/pecundang (token settle ke $1 / $0).
+_WINNER_PRICE = Decimal("0.99")
+_LOSER_PRICE = Decimal("0.01")
 
 
-def parse_resolution(data: dict[str, Any]) -> Outcome | None:
+def parse_resolution(data: dict[str, Any]) -> Outcome | None:  # noqa: PLR0911 - guard clauses
     """Tentukan outcome RESOLVED (ground truth) dari market Gamma.
 
-    Pemenang dibaca dari ``outcomePrices`` (token settle ke $1) DAN hanya
-    dianggap valid bila market benar-benar ``closed`` atau ``umaResolutionStatus``
-    menandakan resolved/settled — sehingga harga 1/0 live (stale) tidak salah
-    dianggap resolusi.
+    Sumber kebenaran = ``outcomePrices`` (JSON-encoded string, mis. ``"[\"1\",\"0\"]"``).
+    Resolved HANYA bila ``closed is true`` DAN harga definitif: tepat satu outcome
+    ``>= 0.99`` dan sisanya ``<= 0.01``. ``umaResolutionStatus`` TIDAK dijadikan
+    syarat. Pemenang = ``outcomes[index_yang_bernilai_1]`` (Up/Down, case-insensitive).
 
     Returns:
-        :class:`Outcome` (UP/DOWN) bila resolved & token Up/Down menang, atau
-        ``None`` bila belum resolved / tak dapat ditentukan.
+        :class:`Outcome` (UP/DOWN), atau ``None`` bila belum resolved / ambigu /
+        token bukan Up/Down.
     """
-    closed = bool(data.get("closed", False))
-    uma = str(data.get("umaResolutionStatus") or "").strip().lower()
-    if not (closed or uma in {"resolved", "settled"}):
+    if not bool(data.get("closed", False)):
         return None
 
     prices_raw = data.get("outcomePrices")
@@ -294,17 +293,27 @@ def parse_resolution(data: dict[str, Any]) -> Outcome | None:
     except GammaSchemaError:
         return None
 
+    winners: list[int] = []
     for idx, raw_price in enumerate(prices):
         try:
             price = Decimal(str(raw_price))
         except (InvalidOperation, ValueError):
-            continue
-        if price >= _WINNER_PRICE and idx < len(labels):
-            label = str(labels[idx]).strip().lower()
-            if label == "up":
-                return Outcome.UP
-            if label == "down":
-                return Outcome.DOWN
+            return None  # harga tak terbaca → jangan tebak
+        if price >= _WINNER_PRICE:
+            winners.append(idx)
+        elif price > _LOSER_PRICE:
+            return None  # nilai menengah (mis. 0.5) → belum definitif
+
+    if len(winners) != 1:
+        return None
+    idx = winners[0]
+    if idx >= len(labels):
+        return None
+    label = str(labels[idx]).strip().lower()
+    if label == "up":
+        return Outcome.UP
+    if label == "down":
+        return Outcome.DOWN
     return None
 
 
@@ -416,20 +425,50 @@ class HttpGammaClient:
                 return parse_market(raw)
         raise GammaError(f"market dengan condition_id={condition_id} tidak ditemukan")
 
+    async def fetch_resolved_market(
+        self,
+        *,
+        slug: str | None = None,
+        condition_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Ambil market mentah yang SUDAH closed (``closed=true``) by slug/condition.
+
+        Gamma ``/markets`` default membuang market closed → resolusi WAJIB
+        memakai ``closed=true``. Kembalikan dict mentah pertama yang cocok, atau
+        ``None`` bila tak ada.
+
+        Raises:
+            ValueError: bila ``slug`` & ``condition_id`` keduanya kosong.
+        """
+        if not slug and not condition_id:
+            raise ValueError("fetch_resolved_market butuh slug atau condition_id")
+        params: dict[str, str] = {"closed": "true", "limit": str(self._page_limit)}
+        if condition_id:
+            params["condition_ids"] = condition_id
+        if slug:
+            params["slug"] = slug
+        batch = await self._get_markets(params)
+        for raw in batch:
+            if not isinstance(raw, dict):
+                continue
+            if condition_id and raw.get("conditionId") == condition_id:
+                return raw
+            if slug and raw.get("slug") == slug:
+                return raw
+        for raw in batch:
+            if isinstance(raw, dict):
+                return raw
+        return None
+
     async def get_resolution(self, condition_id: str) -> Outcome | None:
         """Ambil outcome RESOLVED (ground truth) market via ``condition_id``.
 
-        Mengembalikan ``None`` bila market belum resolved / tak ditemukan
-        (resolver akan mencoba lagi nanti).
+        Query ``/markets?...&closed=true`` (market resolved dibuang dari default),
+        lalu parse via :func:`parse_resolution`. ``None`` bila belum resolved /
+        tak ditemukan (resolver akan coba lagi nanti).
         """
-        batch = await self._get_markets({"condition_ids": condition_id})
-        for raw in batch:
-            if isinstance(raw, dict) and raw.get("conditionId") == condition_id:
-                return parse_resolution(raw)
-        for raw in batch:
-            if isinstance(raw, dict):
-                return parse_resolution(raw)
-        return None
+        raw = await self.fetch_resolved_market(condition_id=condition_id)
+        return parse_resolution(raw) if raw is not None else None
 
     async def _get_markets(self, params: dict[str, str]) -> list[Any]:
         """GET ``/markets`` dengan retry + backoff; kembalikan list JSON."""

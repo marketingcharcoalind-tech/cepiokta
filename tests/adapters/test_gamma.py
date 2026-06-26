@@ -267,6 +267,13 @@ class TestHttpGammaClient:
             HttpGammaClient(BASE_URL, timeframe="1h")
 
 
+RESOLVED_FIXTURE = Path(__file__).parent.parent / "fixtures" / "gamma_resolved_markets.json"
+
+
+def _resolved_markets() -> dict[str, dict[str, Any]]:
+    return cast("dict[str, dict[str, Any]]", json.loads(RESOLVED_FIXTURE.read_text("utf-8")))
+
+
 class TestParseResolution:
     def _resolved(self, prices: str, *, closed: bool = True) -> dict[str, Any]:
         return {
@@ -287,7 +294,7 @@ class TestParseResolution:
         assert parse_resolution(self._resolved('["1", "0"]', closed=False)) is None
 
     def test_mid_prices_returns_none(self) -> None:
-        assert parse_resolution(self._resolved('["0.6", "0.4"]')) is None
+        assert parse_resolution(self._resolved('["0.5", "0.5"]')) is None
 
     def test_missing_prices_returns_none(self) -> None:
         assert parse_resolution({"closed": True, "outcomes": '["Up","Down"]'}) is None
@@ -295,3 +302,59 @@ class TestParseResolution:
     def test_real_fixture_market_open_returns_none(self) -> None:
         # Market di fixture live = active/not-closed → belum resolved.
         assert parse_resolution(_btc5m()) is None
+
+    # --- fixture RESOLVED asli (gamma_resolved_markets.json) ---
+
+    def test_fixture_resolved_up(self) -> None:
+        market = _resolved_markets()["btc-updown-5m-1782480000"]  # outcomePrices ["1","0"]
+        assert market["closed"] is True
+        assert parse_resolution(market) is Outcome.UP
+
+    def test_fixture_resolved_down(self) -> None:
+        market = _resolved_markets()["btc-updown-5m-1782477300"]  # outcomePrices ["0","1"]
+        assert parse_resolution(market) is Outcome.DOWN
+
+    def test_fixture_outcomes_are_json_encoded_strings(self) -> None:
+        # Sanity: schema asli = JSON-encoded string, bukan list.
+        market = _resolved_markets()["btc-updown-5m-1782480000"]
+        assert isinstance(market["outcomes"], str)
+        assert isinstance(market["outcomePrices"], str)
+
+
+class TestFetchResolvedMarket:
+    @respx.mock
+    async def test_get_resolution_sends_closed_true_and_parses_up(self) -> None:
+        market = _resolved_markets()["btc-updown-5m-1782480000"]
+        route = respx.get(f"{BASE_URL}/markets").mock(
+            return_value=httpx.Response(200, json=[market])
+        )
+        async with HttpGammaClient(BASE_URL) as client:
+            outcome = await client.get_resolution(market["conditionId"])
+        assert outcome is Outcome.UP
+        # WAJIB mengirim closed=true (default /markets membuang market closed).
+        params = route.calls[0].request.url.params
+        assert params.get("closed") == "true"
+        assert params.get("condition_ids") == market["conditionId"]
+
+    @respx.mock
+    async def test_fetch_resolved_market_by_slug(self) -> None:
+        market = _resolved_markets()["btc-updown-5m-1782477300"]
+        route = respx.get(f"{BASE_URL}/markets").mock(
+            return_value=httpx.Response(200, json=[market])
+        )
+        async with HttpGammaClient(BASE_URL) as client:
+            raw = await client.fetch_resolved_market(slug=market["slug"])
+        assert raw is not None
+        assert raw["slug"] == market["slug"]
+        assert route.calls[0].request.url.params.get("closed") == "true"
+
+    @respx.mock
+    async def test_get_resolution_empty_returns_none(self) -> None:
+        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=[]))
+        async with HttpGammaClient(BASE_URL) as client:
+            assert await client.get_resolution("0xnope") is None
+
+    async def test_fetch_requires_identifier(self) -> None:
+        async with HttpGammaClient(BASE_URL) as client:
+            with pytest.raises(ValueError, match="slug atau condition_id"):
+                await client.fetch_resolved_market()
