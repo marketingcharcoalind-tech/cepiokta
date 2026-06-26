@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     min_edge: Decimal = Decimal("0.01")
     flip_ratio: Decimal = Decimal("0.90")
     hedge_fraction: Decimal = Decimal("0.5")
+    # Fee taker crypto_fees_v2 (terverifikasi ~7%); dipakai signal/sizing net-of-fee.
+    fee_rate: Decimal = Decimal("0.07")
 
     # --- sizing & risk (lihat docs/06) ---
     bankroll_floor: Decimal = Decimal("50")
@@ -209,6 +211,14 @@ class Settings(BaseSettings):
         """Mode persistensi book wajib 'changes' atau 'all'."""
         if v not in {"changes", "all"}:
             raise ValueError(f"book_persist_mode harus 'changes'|'all', dapat {v!r}")
+        return v
+
+    @field_validator("fee_rate")
+    @classmethod
+    def _check_fee_rate(cls, v: Decimal) -> Decimal:
+        """Fee taker wajib di rentang [0, 1) (0 hanya untuk ablation)."""
+        if not (Decimal("0") <= v < Decimal("1")):
+            raise ValueError(f"fee_rate harus di [0, 1), dapat {v}")
         return v
 
     @model_validator(mode="after")

@@ -32,8 +32,11 @@ resolusi). Opsional feed exchange untuk latensi (flag terpisah, bukan acuan).
 `is_entry_window(now, T_ENTRY_SEC) -> bool`. Murni; pakai Clock.
 
 ## 8.7 domain/signal.py — SignalEngine ("trend")
-`compute(round, price_now, now, vol) -> Signal` (hitung Δ, p_win, ask_win,
-net_edge sesuai docs/05). Fungsi murni & testable.
+`SignalEngine(fee_model).compute(round, price_now, now, vol, *, book_up, book_down,
+expected_slippage) -> Signal` (hitung Δ, sigma_left, z, p_win=Φ(|z|), ask_win,
+net_edge sesuai docs/05). **FeeModel di-inject** (pluggable; default
+`crypto_fees_v2` ~7% taker — lihat `domain/fees.py`). `ask_win` diambil dari order
+book sisi pemimpin. Fungsi murni & testable.
 
 ## 8.8 domain/strategy.py — Strategy ("hedging" + entry)
 `on_tick(signal, book, position) -> list[Decision]` dengan Decision =
