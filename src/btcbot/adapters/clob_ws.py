@@ -14,10 +14,12 @@ Fitur ketahanan (docs/04 §4.4, docs/06 §6.4):
 Koneksi WebSocket diabstraksi di balik :class:`WSConnection` + factory agar
 dapat di-mock secara deterministik saat test (tanpa jaringan nyata).
 
-.. warning::
-   Nama channel, format pesan subscribe, dan skema pesan WAJIB diverifikasi
-   ke dokumentasi resmi Polymarket CLOB V2 (docs/04 §4.8). Konstanta di bawah
-   adalah placeholder.
+.. note::
+   Skema pesan market diverifikasi dari capture **live** (VPS jaringan-bersih):
+   - Book snapshot = JSON **array** (satu objek per token, ada ``bids``/``asks``).
+   - ``price_change`` = JSON **object** (``price_changes[]``: side BUY→bid,
+     SELL→ask; size 0 ⇒ hapus level). Lihat ``tests/fixtures/ws_market_capture.json``.
+   Endpoint: ``wss://.../ws/market`` (path WAJIB ``/market``, tanpa trailing slash).
 """
 
 from __future__ import annotations
@@ -47,6 +49,24 @@ PING_PAYLOAD = json.dumps({"type": "ping"})
 
 # Tipe alias kontrak (docs/04 §4.7).
 BookUpdate = OrderBook
+
+
+def market_channel_url(base_url: str) -> str:
+    """Pastikan URL berakhir di channel ``/market``.
+
+    - ``.../ws/market`` → tetap.
+    - ``.../ws``        → ``.../ws/market``.
+    - selain itu        → apa adanya (mis. URL test).
+
+    Catatan endpoint live: path WAJIB ``/ws/market`` (TANPA trailing slash);
+    ``/ws`` & ``/ws/market/`` → 404.
+    """
+    url = base_url.rstrip("/")
+    if url.endswith("/market"):
+        return url
+    if url.endswith("/ws"):
+        return url + "/market"
+    return url
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,69 +134,142 @@ class ClobWS(Protocol):
         ...
 
 
-def _parse_iso_utc(value: str) -> datetime:
-    """Parse ISO-8601 (termasuk sufiks ``Z``) menjadi datetime UTC aware."""
-    normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
-    dt = datetime.fromisoformat(normalized)
-    if dt.tzinfo is None or dt.utcoffset() is None:
-        raise ValueError(f"timestamp WSS harus tz-aware, dapat: {value!r}")
-    return dt.astimezone(UTC)
+def _parse_ms_ts(value: object, clock: Clock) -> datetime:
+    """Parse timestamp WS (epoch milidetik string/number) → datetime UTC.
 
-
-def _parse_ts(value: object, clock: Clock) -> datetime:
-    """Tentukan timestamp pesan; fallback ke ``clock.now()`` bila tak ada."""
-    if value is None:
-        return clock.now()
-    if isinstance(value, bool):  # hindari int(True)
+    Fallback ke ``clock.now()`` bila tak ada / tak terbaca.
+    """
+    if value is None or isinstance(value, bool):
         return clock.now()
     if isinstance(value, (int, float)):
-        # Asumsi epoch milidetik (TODO verify).
         return datetime.fromtimestamp(value / 1000.0, tz=UTC)
     if isinstance(value, str):
-        return _parse_iso_utc(value)
+        s = value.strip()
+        if s.isdigit():
+            return datetime.fromtimestamp(int(s) / 1000.0, tz=UTC)
+        normalized = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return clock.now()
+        return dt.astimezone(UTC) if dt.tzinfo else clock.now()
     return clock.now()
 
 
-def _levels(raw: object) -> list[BookLevel]:
-    """Konversi list level mentah menjadi list :class:`BookLevel`."""
-    if not isinstance(raw, list):
-        return []
-    out: list[BookLevel] = []
-    for lvl in raw:
-        out.append(BookLevel(price=Decimal(str(lvl["price"])), size=Decimal(str(lvl["size"]))))
-    return out
+# Event control yang di-skip aman (bukan book/price_change).
+_CONTROL_EVENTS = frozenset(
+    {
+        "pong",
+        "ping",
+        "heartbeat",
+        "subscribed",
+        "subscribe",
+        "ack",
+        "tick_size_change",
+        "last_trade_price",
+    }
+)
 
 
-def parse_book_update(obj: dict[str, Any], clock: Clock) -> OrderBook | None:
-    """Petakan pesan market mentah menjadi :class:`OrderBook`.
+@dataclass
+class _AssetBook:
+    """State order book satu asset (price→size untuk bids & asks)."""
 
-    Mengembalikan ``None`` untuk pesan kontrol (pong/heartbeat/ack subscribe)
-    atau pesan tanpa data bids/asks.
+    market: str = ""
+    bids: dict[Decimal, Decimal] = field(default_factory=dict)
+    asks: dict[Decimal, Decimal] = field(default_factory=dict)
 
-    Skema contoh yang diasumsikan (TODO verify ke docs CLOB V2)::
 
-        {
-          "event_type": "book",
-          "asset_id": "111111",
-          "timestamp": "2026-06-25T10:00:00Z",
-          "bids": [{"price": "0.52", "size": "100"}],
-          "asks": [{"price": "0.55", "size": "80"}]
-        }
+class BookState:
+    """Order book yang dipertahankan PER ``asset_id`` lintas pesan WS.
+
+    - Snapshot (objek dgn ``bids``/``asks``) → reset book asset tsb.
+    - ``price_change`` entry → update level (BUY=bids, SELL=asks); size 0 hapus.
     """
-    event_type = obj.get("event_type") or obj.get("type")
-    if event_type in {"pong", "ping", "heartbeat", "subscribed", "subscribe", "ack"}:
-        return None
-    if "bids" not in obj and "asks" not in obj:
-        return None
-    token_id = obj.get("asset_id") or obj.get("token_id") or obj.get("market")
-    if token_id is None:
-        return None
-    return OrderBook(
-        token_id=str(token_id),
-        ts=_parse_ts(obj.get("timestamp"), clock),
-        bids=_levels(obj.get("bids", [])),
-        asks=_levels(obj.get("asks", [])),
-    )
+
+    def __init__(self) -> None:
+        self._books: dict[str, _AssetBook] = {}
+
+    def apply_snapshot(self, elem: dict[str, Any]) -> str:
+        """Reset book dari snapshot; kembalikan ``asset_id``."""
+        asset_id = str(elem["asset_id"])
+        book = _AssetBook(market=str(elem.get("market", "")))
+        for lvl in elem.get("bids") or []:
+            price = Decimal(str(lvl["price"]))
+            size = Decimal(str(lvl["size"]))
+            if size > 0:
+                book.bids[price] = size
+        for lvl in elem.get("asks") or []:
+            price = Decimal(str(lvl["price"]))
+            size = Decimal(str(lvl["size"]))
+            if size > 0:
+                book.asks[price] = size
+        self._books[asset_id] = book
+        return asset_id
+
+    def apply_change(self, market: str, entry: dict[str, Any]) -> str:
+        """Terapkan satu entry ``price_change``; kembalikan ``asset_id``."""
+        asset_id = str(entry["asset_id"])
+        book = self._books.get(asset_id)
+        if book is None:
+            book = _AssetBook(market=market)
+            self._books[asset_id] = book
+        side = str(entry["side"]).upper()
+        price = Decimal(str(entry["price"]))
+        size = Decimal(str(entry["size"]))
+        levels = book.bids if side == "BUY" else book.asks
+        if size == 0:
+            levels.pop(price, None)
+        else:
+            levels[price] = size
+        return asset_id
+
+    def to_orderbook(self, asset_id: str, ts: datetime) -> OrderBook:
+        """Bangun :class:`OrderBook` (bids desc, asks asc — best di index 0)."""
+        book = self._books[asset_id]
+        bids = [
+            BookLevel(price=p, size=s)
+            for p, s in sorted(book.bids.items(), key=lambda kv: kv[0], reverse=True)
+        ]
+        asks = [
+            BookLevel(price=p, size=s) for p, s in sorted(book.asks.items(), key=lambda kv: kv[0])
+        ]
+        return OrderBook(token_id=asset_id, ts=ts, bids=bids, asks=asks)
+
+
+def parse_ws_element(elem: dict[str, Any], state: BookState, clock: Clock) -> list[OrderBook]:
+    """Proses SATU elemen pesan WS market → daftar :class:`OrderBook`.
+
+    - Snapshot (ada ``bids``/``asks`` atau ``event_type=="book"``) → 1 book.
+    - ``price_change`` → 1 book per entry (asset terdampak).
+    - event lain / kontrol → ``[]`` (di-skip aman, tidak crash).
+
+    Mengubah ``state`` (book per asset). Harga/size memakai :class:`Decimal`.
+    """
+    event_type = elem.get("event_type")
+    if event_type in _CONTROL_EVENTS:
+        return []
+
+    if "bids" in elem or "asks" in elem or event_type == "book":
+        if "asset_id" not in elem or elem.get("asset_id") is None:
+            return []
+        asset_id = state.apply_snapshot(elem)
+        ts = _parse_ms_ts(elem.get("timestamp"), clock)
+        return [state.to_orderbook(asset_id, ts)]
+
+    if event_type == "price_change":
+        market = str(elem.get("market", ""))
+        ts = _parse_ms_ts(elem.get("timestamp"), clock)
+        out: list[OrderBook] = []
+        for entry in elem.get("price_changes") or []:
+            if not isinstance(entry, dict) or "asset_id" not in entry:
+                continue
+            asset_id = state.apply_change(market, entry)
+            out.append(state.to_orderbook(asset_id, ts))
+        return out
+
+    # event_type tak dikenal → skip aman.
+    return []
 
 
 class HttpClobWS:
@@ -210,7 +303,7 @@ class HttpClobWS:
         event_sink: EventSink | None = None,
         max_reconnects: int | None = None,
     ) -> None:
-        self._url = url
+        self._url = market_channel_url(url)
         self._connect = connect or default_connect_factory
         self._clock = clock or SystemClock()
         self._stale_sec = stale_ms / 1000.0
@@ -246,7 +339,7 @@ class HttpClobWS:
             first = False
 
             try:
-                await self._subscribe(conn, CHANNEL_MARKET, token_ids)
+                await self._subscribe(conn, token_ids)
                 async for book in self._read_market(conn):
                     # Koneksi terbukti sehat: reset penghitung & backoff.
                     attempts = 0
@@ -285,7 +378,12 @@ class HttpClobWS:
     # ----- internals -----
 
     async def _read_market(self, conn: WSConnection) -> AsyncIterator[OrderBook]:
-        """Loop baca pesan; deteksi stale via timeout lalu ping (heartbeat)."""
+        """Loop baca pesan; deteksi stale via timeout lalu ping (heartbeat).
+
+        Pesan bisa berupa LIST (book snapshot, satu objek per token) atau DICT
+        (price_change / event lain). State book di-reset per koneksi.
+        """
+        state = BookState()
         while True:
             try:
                 raw = await asyncio.wait_for(conn.recv(), timeout=self._stale_sec)
@@ -294,13 +392,16 @@ class HttpClobWS:
                 await conn.send(PING_PAYLOAD)
                 continue
             obj = json.loads(raw)
-            book = parse_book_update(obj, self._clock)
-            if book is not None:
-                yield book
+            elements = obj if isinstance(obj, list) else [obj]
+            for elem in elements:
+                if not isinstance(elem, dict):
+                    continue
+                for book in parse_ws_element(elem, state, self._clock):
+                    yield book
 
-    async def _subscribe(self, conn: WSConnection, channel: str, token_ids: list[str]) -> None:
-        """Kirim pesan subscribe (TODO verify format resmi)."""
-        msg = json.dumps({"type": "subscribe", "channel": channel, "assets_ids": token_ids})
+    async def _subscribe(self, conn: WSConnection, token_ids: list[str]) -> None:
+        """Kirim pesan subscribe channel market (format resmi CLOB)."""
+        msg = json.dumps({"assets_ids": token_ids, "type": CHANNEL_MARKET})
         await conn.send(msg)
 
     def _emit(self, event_type: EventType, detail: str = "") -> None:
