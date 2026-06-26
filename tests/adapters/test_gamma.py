@@ -18,8 +18,9 @@ from btcbot.adapters.gamma import (
     is_updown_market,
     match_updown_slug,
     parse_market,
+    parse_resolution,
 )
-from btcbot.domain.models import MarketStatus, RoundMeta
+from btcbot.domain.models import MarketStatus, Outcome, RoundMeta
 
 BASE_URL = "https://gamma.example.test"
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "gamma_updown_live_fixture.json"
@@ -264,3 +265,33 @@ class TestHttpGammaClient:
     async def test_invalid_timeframe_rejected(self) -> None:
         with pytest.raises(ValueError, match="timeframe"):
             HttpGammaClient(BASE_URL, timeframe="1h")
+
+
+class TestParseResolution:
+    def _resolved(self, prices: str, *, closed: bool = True) -> dict[str, Any]:
+        return {
+            "outcomes": '["Up", "Down"]',
+            "outcomePrices": prices,
+            "closed": closed,
+            "umaResolutionStatus": "resolved" if closed else "",
+        }
+
+    def test_resolved_up(self) -> None:
+        assert parse_resolution(self._resolved('["1", "0"]')) is Outcome.UP
+
+    def test_resolved_down(self) -> None:
+        assert parse_resolution(self._resolved('["0", "1"]')) is Outcome.DOWN
+
+    def test_not_closed_returns_none(self) -> None:
+        # outcomePrices 1/0 tapi belum closed → JANGAN dianggap resolved (live stale).
+        assert parse_resolution(self._resolved('["1", "0"]', closed=False)) is None
+
+    def test_mid_prices_returns_none(self) -> None:
+        assert parse_resolution(self._resolved('["0.6", "0.4"]')) is None
+
+    def test_missing_prices_returns_none(self) -> None:
+        assert parse_resolution({"closed": True, "outcomes": '["Up","Down"]'}) is None
+
+    def test_real_fixture_market_open_returns_none(self) -> None:
+        # Market di fixture live = active/not-closed → belum resolved.
+        assert parse_resolution(_btc5m()) is None

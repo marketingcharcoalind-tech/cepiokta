@@ -66,6 +66,44 @@ class TestSchema:
         await store.upsert_round(_round())
         assert await store.get_round(48247) is not None
 
+    async def test_migration_idempotent_resolution_columns(self, store: Store) -> None:
+        # Jalankan migrasi berkali-kali aman; kolom resolusi tersedia.
+        await store.create_tables()
+        await store.create_tables()
+        await store.upsert_round(_round())
+        res = await store.get_resolution(48247)
+        assert res is not None
+        assert res.settlement_price is None
+        assert res.resolution_source is None
+
+
+class TestResolutionColumns:
+    async def test_set_and_get_resolution(self, store: Store) -> None:
+        await store.upsert_round(_round())
+        await store.set_resolution(
+            48247, Outcome.UP, settlement_price=Decimal("64321.5"), resolution_source="gamma"
+        )
+        res = await store.get_resolution(48247)
+        assert res is not None
+        assert res.status == "resolved"
+        assert res.resolved_outcome is Outcome.UP
+        assert res.settlement_price == Decimal("64321.5")
+        assert res.resolution_source == "gamma"
+
+    async def test_get_unresolved_rounds(self, store: Store) -> None:
+        past = datetime(2026, 6, 25, 9, 0, tzinfo=UTC)
+        # ronde lampau belum resolved
+        await store.upsert_round(_round(round_no=1, status=RoundStatus.ACTIVE))
+        # ronde lampau sudah resolved
+        await store.upsert_round(_round(round_no=2, status=RoundStatus.ACTIVE))
+        await store.set_resolution(2, Outcome.UP)
+        before = datetime(2026, 6, 25, 11, 0, tzinfo=UTC)  # > window_end (10:05)
+        unresolved = await store.get_unresolved_rounds(before)
+        nos = {r.round_no for r in unresolved}
+        assert 1 in nos
+        assert 2 not in nos  # sudah resolved → tidak termasuk
+        assert past < before  # sanity
+
 
 class TestRounds:
     async def test_upsert_and_get(self, store: Store) -> None:

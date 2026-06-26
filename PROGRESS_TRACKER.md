@@ -132,6 +132,7 @@ Fase 4 [          ] 0/3     G4: belum
 | F1-fee | Reverse-engineer formula `crypto_fees_v2` → masukkan ke net_edge | 2026-06-25 | market berbiaya; edge harus net setelah fee | Fase 1 (signal/sizing) | 🟦 |
 | B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader + RPC failover) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity; FailoverPriceSource primary+fallbacks, UA browser | ✅ |
 | B3 | Gamma discovery — RESOLVED (slug-based + window benar + fee parsed) | 2026-06-25 | — | regex slug `asset-updown-tf-epoch`; window dari eventStartTime/endDate (bukan startDate); query end_date window + UA browser | ✅ |
+| RES | Resolution recorder — RESOLVED (label outcome ronde) | 2026-06-26 | — | Gamma primer + Chainlink cross-check; settlement_price/resolution_source; resolve_due + `--resolve-backfill`; mismatch di-log | ✅ |
 
 ## 🧠 Decision Log (ADR ringkas)
 | Tgl | Keputusan | Alasan | ADR file |
@@ -144,6 +145,7 @@ Fase 4 [          ] 0/3     G4: belum
 | 2026-06-26 | WS keepalive: server tak balas ping protokol → `ping_interval=None`/`ping_timeout=None` (matikan keepalive library) + heartbeat "PING" aplikasi tiap 10s (task terpisah) + stale 30s → reconnect | fix `1011 keepalive ping timeout` (mati ~45s meski data mengalir); konfig `WS_APP_PING_SECONDS`/`WS_STALE_SECONDS` | — |
 | 2026-06-26 | RPC failover: primary `POLYGON_RPC_URL` (chainstack) + fallbacks publik (publicnode/blastapi/blockpi). UA browser WAJIB (RPC publik 403 tanpa UA). Gagal = exception/HTTP/JSON-RPC/price<=0/stale>120s → endpoint berikutnya; semua gagal → AllRpcFailedError (Δ=None+gap) | RPC tunggal down → bot buta; failover otomatis | — |
 | 2026-06-26 | Retensi book: write-on-change + throttle 1s + fine-grain 45s akhir-window; default `BOOK_PERSIST_MODE=changes`. Order book in-mem tetap penuh; hanya persistensi di-throttle. Schema tetap (tanpa migrasi) | ~333 baris/dtk (~6 GB/hari) mayoritas duplikat depth-jitter → soak berhari/minggu | — |
+| 2026-06-26 | Resolution recorder: Gamma primer (outcomePrices/closed = ground truth) + Chainlink cross-check best-effort; kolom `settlement_price`/`resolution_source` (additive, migrasi idempoten). `resolution_mismatch` di-log (→ B2b). Backfill via `--resolve-backfill` | rounds.resolved_outcome selalu None → data soak tak bisa dikalibrasi | — |
 | | | | |
 
 ## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)

@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     chainlink_max_staleness_sec: int = 120
     ws_app_ping_seconds: int = 10
     ws_stale_seconds: int = 30
+    resolve_poll_seconds: int = 30
 
     # --- strategy params (lihat docs/05) ---
     t_entry_sec: int = 20
@@ -189,6 +190,7 @@ class Settings(BaseSettings):
         "chainlink_max_staleness_sec",
         "ws_app_ping_seconds",
         "ws_stale_seconds",
+        "resolve_poll_seconds",
         "polygon_rpc_timeout_seconds",
         "book_sample_ms",
         "book_finegrain_sec",

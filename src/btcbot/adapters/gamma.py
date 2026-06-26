@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import httpx
 
 from btcbot.adapters.clock import Clock, SystemClock
-from btcbot.domain.models import FeeSchedule, MarketStatus, RoundMeta
+from btcbot.domain.models import FeeSchedule, MarketStatus, Outcome, RoundMeta
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -264,6 +264,50 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Ambang harga outcome pemenang (token settle ke $1).
+_WINNER_PRICE = Decimal("0.999")
+
+
+def parse_resolution(data: dict[str, Any]) -> Outcome | None:
+    """Tentukan outcome RESOLVED (ground truth) dari market Gamma.
+
+    Pemenang dibaca dari ``outcomePrices`` (token settle ke $1) DAN hanya
+    dianggap valid bila market benar-benar ``closed`` atau ``umaResolutionStatus``
+    menandakan resolved/settled — sehingga harga 1/0 live (stale) tidak salah
+    dianggap resolusi.
+
+    Returns:
+        :class:`Outcome` (UP/DOWN) bila resolved & token Up/Down menang, atau
+        ``None`` bila belum resolved / tak dapat ditentukan.
+    """
+    closed = bool(data.get("closed", False))
+    uma = str(data.get("umaResolutionStatus") or "").strip().lower()
+    if not (closed or uma in {"resolved", "settled"}):
+        return None
+
+    prices_raw = data.get("outcomePrices")
+    if prices_raw is None:
+        return None
+    try:
+        prices = _json_list(prices_raw, "outcomePrices")
+        labels = _json_list(data.get("outcomes") or "[]", "outcomes")
+    except GammaSchemaError:
+        return None
+
+    for idx, raw_price in enumerate(prices):
+        try:
+            price = Decimal(str(raw_price))
+        except (InvalidOperation, ValueError):
+            continue
+        if price >= _WINNER_PRICE and idx < len(labels):
+            label = str(labels[idx]).strip().lower()
+            if label == "up":
+                return Outcome.UP
+            if label == "down":
+                return Outcome.DOWN
+    return None
+
+
 class HttpGammaClient:
     """Implementasi :class:`GammaClient` (Gamma REST publik, read-only).
 
@@ -371,6 +415,21 @@ class HttpGammaClient:
             if isinstance(raw, dict):
                 return parse_market(raw)
         raise GammaError(f"market dengan condition_id={condition_id} tidak ditemukan")
+
+    async def get_resolution(self, condition_id: str) -> Outcome | None:
+        """Ambil outcome RESOLVED (ground truth) market via ``condition_id``.
+
+        Mengembalikan ``None`` bila market belum resolved / tak ditemukan
+        (resolver akan mencoba lagi nanti).
+        """
+        batch = await self._get_markets({"condition_ids": condition_id})
+        for raw in batch:
+            if isinstance(raw, dict) and raw.get("conditionId") == condition_id:
+                return parse_resolution(raw)
+        for raw in batch:
+            if isinstance(raw, dict):
+                return parse_resolution(raw)
+        return None
 
     async def _get_markets(self, params: dict[str, str]) -> list[Any]:
         """GET ``/markets`` dengan retry + backoff; kembalikan list JSON."""

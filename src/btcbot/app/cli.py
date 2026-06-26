@@ -28,6 +28,7 @@ from btcbot.adapters.gamma import HttpGammaClient
 from btcbot.app.demo import build_demo_runtime
 from btcbot.config.settings import Settings, get_settings
 from btcbot.data.recorder import Recorder
+from btcbot.data.resolver import Resolver
 from btcbot.data.store import Store
 from btcbot.domain.models import round_from_meta
 
@@ -76,6 +77,7 @@ async def run_readonly(  # noqa: PLR0913
     settings: Settings,
     gamma: GammaClient,
     recorder: Recorder,
+    resolver: Resolver | None = None,
     max_rounds: int | None = None,
     updates_per_round: int | None = None,
     shutdown: asyncio.Event | None = None,
@@ -84,7 +86,8 @@ async def run_readonly(  # noqa: PLR0913
     """Loop readonly: rekam ronde demi ronde. Kembalikan jumlah ronde diproses.
 
     Tidak mengirim order. Berhenti bila ``max_rounds`` tercapai atau
-    ``shutdown`` di-set (mis. SIGINT).
+    ``shutdown`` di-set (mis. SIGINT). Bila ``resolver`` diberikan, ronde lama
+    yang due dilabeli outcome-nya tiap ``resolve_poll_seconds`` (sumber Gamma).
     """
     log = logger or structlog.get_logger()
     balance = settings.paper_starting_balance  # saldo simulasi tetap (readonly)
@@ -124,10 +127,18 @@ async def run_readonly(  # noqa: PLR0913
             limit=updates_per_round,
         )
 
-        # Rekonsiliasi resolusi bila sudah tersedia.
-        resolved = await gamma.get_market(meta.condition_id)
-        if resolved.outcome is not None:
-            await recorder.record_resolution(round_no, resolved.outcome)
+        # Resolusi: resolver (ground truth Gamma untuk ronde lama yang due) ATAU
+        # fallback inline (mode demo) untuk ronde yang sudah resolved seketika.
+        resolved_str: str | None = None
+        if resolver is not None:
+            n = await resolver.resolve_due()
+            if n:
+                log.info("rounds_resolved", count=n)
+        else:
+            inline = await gamma.get_market(meta.condition_id)
+            if inline.outcome is not None:
+                await recorder.record_resolution(round_no, inline.outcome)
+                resolved_str = str(inline.outcome)
 
         processed += 1
         log.info(
@@ -137,14 +148,14 @@ async def run_readonly(  # noqa: PLR0913
             delta=delta_str,
             balance=str(balance),
             mode=str(settings.mode),
-            resolved=(None if resolved.outcome is None else str(resolved.outcome)),
+            resolved=resolved_str,
         )
 
     return processed
 
 
-async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorder]:
-    """Bangun store + adapter nyata + recorder (readonly, tanpa order).
+async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorder, Resolver]:
+    """Bangun store + adapter nyata + recorder + resolver (readonly, tanpa order).
 
     Catatan: ``ChainlinkDataFeed`` membaca on-chain via RPC. Bila harga gagal
     dibaca/anomali, ``record_price_tick`` melempar ``PriceUnavailableError``
@@ -159,9 +170,8 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
         stale_ms=settings.ws_stale_seconds * 1000,
         app_ping_seconds=settings.ws_app_ping_seconds,
     )
-    reader_endpoints = settings.rpc_endpoints()
     price_source = FailoverPriceSource.from_endpoints(
-        rpc_urls=reader_endpoints,
+        rpc_urls=settings.rpc_endpoints(),
         address=settings.chainlink_btcusd_source,
         clock=clock,
         source_label=f"chainlink:{settings.chainlink_feed_type}",
@@ -179,7 +189,20 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
         book_finegrain_sec=settings.book_finegrain_sec,
     )
     ws.set_event_sink(recorder.on_circuit_event)
-    return store, gamma, recorder
+    resolver = Resolver(store, gamma, clock, price_source=price_source)
+    return store, gamma, recorder, resolver
+
+
+async def run_backfill(settings: Settings) -> int:
+    """Sapu SEMUA ronde belum-resolve (label outcome dari Gamma). Kembalikan jumlah."""
+    log = structlog.get_logger()
+    store, _gamma, _recorder, resolver = await build_runtime(settings)
+    try:
+        n = await resolver.backfill()
+        log.info("backfill_complete", resolved=n)
+        return n
+    finally:
+        await store.close()
 
 
 async def main_async(
@@ -201,10 +224,12 @@ async def main_async(
     store: Store
     gamma: GammaClient
     recorder: Recorder
+    resolver: Resolver | None
     if demo:
         store, gamma, recorder = await build_demo_runtime(settings)
+        resolver = None  # demo pakai jalur resolusi inline (DemoGamma)
     else:
-        store, gamma, recorder = await build_runtime(settings)
+        store, gamma, recorder, resolver = await build_runtime(settings)
 
     shutdown = asyncio.Event()
     _install_signal_handlers(shutdown, log)
@@ -214,6 +239,7 @@ async def main_async(
             settings=settings,
             gamma=gamma,
             recorder=recorder,
+            resolver=resolver,
             max_rounds=max_rounds,
             updates_per_round=updates_per_round,
             shutdown=shutdown,
@@ -258,10 +284,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--updates-per-round", type=int, default=None, help="batas snapshot orderbook per ronde"
     )
+    parser.add_argument(
+        "--resolve-backfill",
+        action="store_true",
+        help="sapu semua ronde belum-resolve (label outcome dari Gamma) lalu keluar",
+    )
     args = parser.parse_args(argv)
 
     settings = get_settings()
     configure_logging(settings.log_level)
+
+    if args.resolve_backfill:
+        try:
+            asyncio.run(run_backfill(settings))
+        except KeyboardInterrupt:
+            structlog.get_logger().info("interrupted")
+        return 0
 
     try:
         asyncio.run(

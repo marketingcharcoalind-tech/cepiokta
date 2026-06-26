@@ -55,7 +55,8 @@ class RoundResult:
 CREATE TABLE rounds (
   condition_id TEXT, round_no INTEGER PRIMARY KEY, token_up TEXT, token_down TEXT,
   window_start TIMESTAMPTZ, window_end TIMESTAMPTZ, start_price NUMERIC,
-  tick_size NUMERIC, min_order_size NUMERIC, status TEXT, resolved_outcome TEXT);
+  tick_size NUMERIC, min_order_size NUMERIC, status TEXT, resolved_outcome TEXT,
+  settlement_price TEXT, resolution_source TEXT);   -- additive (lihat §7.3.2)
 
 CREATE TABLE book_snapshots (         -- fase 0 recorder (bisa besar; pertimbangkan kompresi/parquet)
   id BIGSERIAL PRIMARY KEY, round_no INTEGER, token_id TEXT, ts TIMESTAMPTZ,
@@ -104,6 +105,20 @@ membaca series untuk kalibrasi/backtest, perlakukan tiap baris sebagai
 "berlaku sampai baris berikutnya" (step/last-value-carried-forward), JANGAN
 asumsikan interval sampling tetap. best_bid/ask over time + likuiditas + tail
 window tetap utuh; jitter depth menengah sengaja dijatuhkan.
+
+### 7.3.2 Resolusi ronde — `resolved_outcome`/`settlement_price`/`resolution_source`
+Diisi oleh resolution recorder (`data/resolver.py`) setelah `window_end`:
+- `resolved_outcome` = `"UP"`/`"DOWN"` + `status='resolved'`.
+- `resolution_source` = `"gamma"` (primer). Gamma melaporkan token pemenang via
+  `outcomePrices` (mis. `["1","0"]`) saat market `closed`/`umaResolutionStatus`
+  resolved — inilah yang benar-benar dibayar (ground truth).
+- `settlement_price` = harga Chainlink saat cross-check (best-effort; hanya untuk
+  ronde yang BARU berakhir, backfill ronde lama → NULL). Bila outcome Chainlink
+  (settlement vs `start_price`) ≠ Gamma → log `resolution_mismatch` (menyingkap
+  selisih Data Feeds vs Data Streams → B2b). Outcome final TETAP dari Gamma.
+- Konvensi enum `Outcome` (`"UP"`/`"DOWN"`, uppercase). BTC up/down tak punya
+  "tie" (resolusi `≥` → Up).
+- Migrasi additive idempoten (kolom dicek sebelum `ALTER`); data lama aman.
 
 
 

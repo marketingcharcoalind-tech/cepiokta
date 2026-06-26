@@ -46,7 +46,9 @@ _SCHEMA: tuple[str, ...] = (
         tick_size TEXT,
         min_order_size TEXT,
         status TEXT,
-        resolved_outcome TEXT
+        resolved_outcome TEXT,
+        settlement_price TEXT,
+        resolution_source TEXT
     )
     """,
     """
@@ -174,6 +176,17 @@ class EquityPoint:
     mode: str
 
 
+@dataclass(frozen=True, slots=True)
+class ResolutionRow:
+    """Hasil resolusi sebuah ronde (kolom resolusi di ``rounds``)."""
+
+    round_no: int
+    status: str
+    resolved_outcome: Outcome | None
+    settlement_price: Decimal | None
+    resolution_source: str | None
+
+
 # --- helper serialisasi ---
 
 
@@ -239,7 +252,18 @@ class Store:
         """Buat semua tabel & index bila belum ada (idempotent)."""
         for ddl in _SCHEMA:
             await self._conn.execute(ddl)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Migrasi additive idempoten (ALTER kolom baru bila belum ada)."""
+        async with self._conn.execute("PRAGMA table_info(rounds)") as cur:
+            rows = await cur.fetchall()
+        columns = {str(row["name"]) for row in rows}
+        if "settlement_price" not in columns:
+            await self._conn.execute("ALTER TABLE rounds ADD COLUMN settlement_price TEXT")
+        if "resolution_source" not in columns:
+            await self._conn.execute("ALTER TABLE rounds ADD COLUMN resolution_source TEXT")
 
     async def close(self) -> None:
         """Tutup koneksi DB."""
@@ -281,6 +305,10 @@ class Store:
             row = await cur.fetchone()
         if row is None:
             return None
+        return self._row_to_round(row)
+
+    @staticmethod
+    def _row_to_round(row: aiosqlite.Row) -> Round:
         return Round(
             condition_id=str(row["condition_id"]),
             round_no=int(row["round_no"]),
@@ -293,6 +321,61 @@ class Store:
             min_order_size=_req_dec(row["min_order_size"]),
             status=RoundStatus(str(row["status"])),
             resolved_outcome=_opt_outcome(row["resolved_outcome"]),
+        )
+
+    async def get_unresolved_rounds(
+        self, before: datetime, *, limit: int | None = None
+    ) -> list[Round]:
+        """Ronde yang window-nya sudah lewat (``window_end < before``) & belum resolved."""
+        sql = (
+            "SELECT * FROM rounds WHERE window_end < ? "
+            "AND COALESCE(status, '') != 'resolved' ORDER BY round_no"
+        )
+        params: tuple[object, ...] = (_dt_to_db(before),)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (*params, limit)
+        async with self._conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [self._row_to_round(row) for row in rows]
+
+    async def set_resolution(
+        self,
+        round_no: int,
+        outcome: Outcome,
+        *,
+        settlement_price: Decimal | None = None,
+        resolution_source: str = "gamma",
+    ) -> None:
+        """Tandai ronde resolved + simpan outcome/settlement_price/source."""
+        await self._conn.execute(
+            """
+            UPDATE rounds SET status = 'resolved', resolved_outcome = ?,
+                settlement_price = ?, resolution_source = ?
+            WHERE round_no = ?
+            """,
+            (str(outcome), _dec_to_db(settlement_price), resolution_source, round_no),
+        )
+        await self._conn.commit()
+
+    async def get_resolution(self, round_no: int) -> ResolutionRow | None:
+        """Ambil kolom resolusi sebuah ronde."""
+        async with self._conn.execute(
+            "SELECT round_no, status, resolved_outcome, settlement_price, resolution_source "
+            "FROM rounds WHERE round_no = ?",
+            (round_no,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return ResolutionRow(
+            round_no=int(row["round_no"]),
+            status=str(row["status"]),
+            resolved_outcome=_opt_outcome(row["resolved_outcome"]),
+            settlement_price=_dec_from_db(row["settlement_price"]),
+            resolution_source=(
+                None if row["resolution_source"] is None else str(row["resolution_source"])
+            ),
         )
 
     async def update_round_status(
