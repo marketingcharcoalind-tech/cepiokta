@@ -83,7 +83,7 @@ class FillResult:
 _NO_FILL = FillResult(filled_size=_ZERO, avg_price=_ZERO, notional=_ZERO)
 
 
-def simulate_fill(  # noqa: PLR0913 - parameter eksplisit (keyword-only)
+def simulate_fill(  # noqa: PLR0913, PLR0911 - parameter & guard eksplisit
     *,
     book: OrderBook,
     side: str,
@@ -91,6 +91,7 @@ def simulate_fill(  # noqa: PLR0913 - parameter eksplisit (keyword-only)
     requested_size: Decimal,
     order_type: str,
     competition_fraction: Decimal = _ZERO,
+    ignore_depth: bool = False,
 ) -> FillResult:
     """Simulasikan eksekusi taker pada ``book`` (murni, deterministik).
 
@@ -106,6 +107,8 @@ def simulate_fill(  # noqa: PLR0913 - parameter eksplisit (keyword-only)
         requested_size: Ukuran diminta (share).
         order_type: ``"FOK"`` | ``"FAK"``.
         competition_fraction: Fraksi depth diambil bot lain ([0,1)).
+        ignore_depth: Bila True → isi penuh di harga best (ablation **tanpa
+            slippage**: likuiditas dianggap tak terbatas di best in-range).
     """
     if requested_size <= _ZERO:
         return _NO_FILL
@@ -115,6 +118,18 @@ def simulate_fill(  # noqa: PLR0913 - parameter eksplisit (keyword-only)
         levels = sorted(book.asks, key=lambda lvl: lvl.price)
     else:
         levels = sorted(book.bids, key=lambda lvl: lvl.price, reverse=True)
+
+    if ignore_depth:
+        if not levels:
+            return _NO_FILL
+        best = levels[0]
+        if (is_buy and best.price > limit_price) or (not is_buy and best.price < limit_price):
+            return _NO_FILL
+        return FillResult(
+            filled_size=requested_size,
+            avg_price=best.price,
+            notional=requested_size * best.price,
+        )
 
     remaining = requested_size
     filled = _ZERO
@@ -164,6 +179,7 @@ class ReplayConfig:
     fee_model: FeeModel = field(default_factory=ProportionalTakerFee)
     latency_ticks: int = 1
     competition_fraction: Decimal = _ZERO
+    slippage_enabled: bool = True
     seed: int = 42
 
     @classmethod
@@ -182,6 +198,17 @@ class ReplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RoundDiagnostics:
+    """Diagnostik per ronde ter-entry (untuk reliability curve & distribusi)."""
+
+    round_no: int
+    p_win_entry: Decimal
+    net_edge_entry: Decimal
+    won: bool  # sisi yang dimasuki (leader) menang sesuai label Gamma
+    pnl: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class ReplaySummary:
     """Ringkasan hasil replay seluruh ronde (input metrik docs/09 §9.4)."""
 
@@ -192,6 +219,7 @@ class ReplaySummary:
     total_pnl: Decimal
     final_balance: Decimal
     results: tuple[RoundResult, ...]
+    diagnostics: tuple[RoundDiagnostics, ...] = ()
 
 
 # ----- engine -----
@@ -208,6 +236,8 @@ class _RoundLedger:
         self.entry_price: Decimal = _ZERO
         self.entry_size: Decimal = _ZERO
         self.entry_outcome: str = "NONE"
+        self.entry_p_win: Decimal = _ZERO
+        self.entry_net_edge: Decimal = _ZERO
         self.fills: list[Fill] = []
 
     @property
@@ -242,6 +272,17 @@ class ReplayEngine:
         Settlement memakai ``rnd.resolved_outcome`` (label Gamma). ``None`` bila
         ronde belum resolved atau tak ada tick.
         """
+        detailed = self._simulate(rnd, ticks, bankroll=bankroll)
+        return None if detailed is None else detailed[0]
+
+    def _simulate(
+        self,
+        rnd: Round,
+        ticks: Sequence[ReplayTick],
+        *,
+        bankroll: Decimal,
+    ) -> tuple[RoundResult, RoundDiagnostics] | None:
+        """Inti simulasi satu ronde → (RoundResult, RoundDiagnostics) atau None."""
         if rnd.resolved_outcome is None or not ticks:
             return None
 
@@ -281,7 +322,18 @@ class ReplayEngine:
 
         if not ledger.entered:
             return None
-        return self._settle(rnd, ledger, bankroll)
+        result = self._settle(rnd, ledger, bankroll)
+        won = ledger.entry_outcome == (
+            rnd.resolved_outcome.value if rnd.resolved_outcome is not None else ""
+        )
+        diag = RoundDiagnostics(
+            round_no=rnd.round_no,
+            p_win_entry=ledger.entry_p_win,
+            net_edge_entry=ledger.entry_net_edge,
+            won=won,
+            pnl=result.pnl,
+        )
+        return result, diag
 
     def run(
         self,
@@ -290,14 +342,17 @@ class ReplayEngine:
         """Jalankan replay untuk banyak ronde; akumulasi equity & ringkasan."""
         balance = self._cfg.starting_balance
         results: list[RoundResult] = []
+        diagnostics: list[RoundDiagnostics] = []
         wins = losses = entered = 0
         for rnd, ticks in rounds:
-            res = self.run_round(rnd, ticks, bankroll=balance)
-            if res is None:
+            detailed = self._simulate(rnd, ticks, bankroll=balance)
+            if detailed is None:
                 continue
+            res, diag = detailed
             entered += 1
             balance = res.balance_after
             results.append(res)
+            diagnostics.append(diag)
             if res.pnl > _ZERO:
                 wins += 1
             elif res.pnl < _ZERO:
@@ -310,6 +365,7 @@ class ReplayEngine:
             total_pnl=balance - self._cfg.starting_balance,
             final_balance=balance,
             results=tuple(results),
+            diagnostics=tuple(diagnostics),
         )
 
     # ----- helpers -----
@@ -370,6 +426,7 @@ class ReplayEngine:
             requested_size=sized,
             order_type=decision.order_type,
             competition_fraction=self._cfg.competition_fraction,
+            ignore_depth=not self._cfg.slippage_enabled,
         )
         if not fr.filled:
             return
@@ -382,6 +439,8 @@ class ReplayEngine:
         ledger.entry_price = fr.avg_price
         ledger.entry_size = fr.filled_size
         ledger.entry_outcome = decision.outcome
+        ledger.entry_p_win = signal.p_win
+        ledger.entry_net_edge = signal.net_edge
         ledger.fills.append(
             Fill(
                 order_id=f"bt-{rnd.round_no}-entry",
@@ -415,6 +474,7 @@ class ReplayEngine:
             requested_size=hedge_size,
             order_type=decision.order_type,
             competition_fraction=self._cfg.competition_fraction,
+            ignore_depth=not self._cfg.slippage_enabled,
         )
         if not fr.filled:
             return
@@ -454,6 +514,7 @@ class ReplayEngine:
             requested_size=qty,
             order_type=decision.order_type,
             competition_fraction=self._cfg.competition_fraction,
+            ignore_depth=not self._cfg.slippage_enabled,
         )
         if not fr.filled:
             return False
