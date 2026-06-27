@@ -1,5 +1,6 @@
 """Unit tests for btcbot.data.recorder (integration with in-memory store)."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -345,3 +346,99 @@ class TestRetentionConsume:
         await rec.consume_market(48247, ["111"], window_end=WE)
         snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
         assert len(snaps) == 3  # tiap perubahan harga tertulis
+
+
+# ----- FREEZE fix: consume_market exits at window_end+drain & aclose stream -----
+
+
+class _SilentThenBlockWS:
+    """ClobWS palsu: yield ``books`` lalu MEMBLOK selamanya (simulasi window tutup)."""
+
+    def __init__(self, books: list[OrderBook]) -> None:
+        self._books = books
+        self.closed = False
+
+    async def stream_market(self, _token_ids: list[str]) -> AsyncIterator[OrderBook]:
+        try:
+            for b in self._books:
+                yield b
+            await asyncio.Event().wait()  # tak pernah di-set → blok selamanya
+        finally:
+            self.closed = True  # ter-set saat cancel (timeout) atau aclose
+
+    def stream_user(self) -> AsyncIterator[UserUpdate]:
+        raise NotImplementedError
+
+
+class _InfiniteAdvancingWS:
+    """ClobWS palsu: yield book tanpa henti, memajukan SimClock tiap yield."""
+
+    def __init__(self, clock: SimClock, step_sec: float) -> None:
+        self._clock = clock
+        self._step = step_sec
+        self.closed = False
+        self.count = 0
+
+    async def stream_market(self, _token_ids: list[str]) -> AsyncIterator[OrderBook]:
+        try:
+            while True:
+                self._clock.advance(timedelta(seconds=self._step))
+                self.count += 1
+                yield _book(bid=f"0.5{self.count % 9}")  # best berubah → selalu persist
+        finally:
+            self.closed = True
+
+    def stream_user(self) -> AsyncIterator[UserUpdate]:
+        raise NotImplementedError
+
+
+class TestConsumeMarketFreezeFix:
+    async def test_exits_when_stream_silent_after_window(self, store: Store) -> None:
+        # 3 book lalu senyap selamanya → HARUS return (tak hang) + aclose terpanggil.
+        clock = SimClock(WS)
+        ws = _SilentThenBlockWS([_book(bid="0.52"), _book(bid="0.53"), _book(bid="0.54")])
+        rec = _rec(store, ws, clock, poll_seconds=0.02, heartbeat_seconds=3600)
+        # window_end = WS → deadline = WS + drain; clock tak maju → exit via stream mati.
+        written = await asyncio.wait_for(
+            rec.consume_market(48247, ["111"], window_end=WS), timeout=5.0
+        )
+        assert ws.closed is True  # stream di-aclose / generator difinalisasi
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert len(snaps) == 3  # 3 book awal terekam (+ penanda penutup tak duplikat)
+        assert written == 3
+
+    async def test_exits_at_deadline_with_live_stream(self, store: Store) -> None:
+        # Stream "hidup" (selalu ada book) → berhenti tepat di window_end + drain.
+        clock = SimClock(WS)
+        ws = _InfiniteAdvancingWS(clock, step_sec=10.0)
+        rec = _rec(store, ws, clock, drain_seconds=3, poll_seconds=1.0, heartbeat_seconds=3600)
+        window_end = WS + timedelta(seconds=30)  # deadline = WS + 33s
+        written = await asyncio.wait_for(
+            rec.consume_market(48247, ["111"], window_end=window_end), timeout=5.0
+        )
+        assert ws.closed is True
+        assert written > 0
+        # clock maju 10s/book → berhenti setelah melewati 33s (≈4 book).
+        assert ws.count <= 5
+
+    async def test_window_end_none_keeps_limit_behavior(self, store: Store) -> None:
+        # Tanpa window_end → perilaku lama (limit-only, blocking) tetap bekerja.
+        clock = SimClock(WS)
+        ws = _SilentThenBlockWS([_book(bid="0.52"), _book(bid="0.53"), _book(bid="0.54")])
+        rec = _rec(store, ws, clock)
+        written = await asyncio.wait_for(rec.consume_market(48247, ["111"], limit=2), timeout=5.0)
+        assert written == 2
+        assert ws.closed is True
+
+    async def test_heartbeat_logged_during_silence(self, store: Store) -> None:
+        import structlog.testing  # noqa: PLC0415
+
+        clock = SimClock(WS)
+        ws = _InfiniteAdvancingWS(clock, step_sec=20.0)
+        rec = _rec(store, ws, clock, drain_seconds=3, poll_seconds=1.0, heartbeat_seconds=15)
+        window_end = WS + timedelta(seconds=40)
+        with structlog.testing.capture_logs() as logs:
+            await asyncio.wait_for(
+                rec.consume_market(48247, ["111"], window_end=window_end), timeout=5.0
+            )
+        assert any(e.get("event") == "heartbeat" for e in logs)

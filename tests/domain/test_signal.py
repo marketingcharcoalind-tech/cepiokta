@@ -165,8 +165,8 @@ class TestComputeNetEdge:
             book_up=book("up", "0.80"),
             expected_slippage=Decimal("0.01"),
         )
-        # net_edge = p_win - ask_win - fee(=0.07*0.80) - slippage
-        expected = sig.p_win - Decimal("0.80") - Decimal("0.056") - Decimal("0.01")
+        # net_edge = p_win - ask_win - fee(=0.07*min(0.80,0.20)=0.014) - slippage
+        expected = sig.p_win - Decimal("0.80") - Decimal("0.014") - Decimal("0.01")
         assert sig.net_edge == expected
 
     def test_net_edge_decreases_when_fee_rises(self) -> None:

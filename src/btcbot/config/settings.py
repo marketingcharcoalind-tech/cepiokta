@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     book_persist_mode: str = "changes"  # "changes" (write-on-change+throttle) | "all"
     book_sample_ms: int = 1000  # throttle: maks 1 baris/token per interval ini
     book_finegrain_sec: int = 45  # akhir-window: nonaktifkan throttle (resolusi penuh)
+    book_drain_seconds: int = 3  # consume_market berhenti di window_end + ini
+    book_poll_seconds: float = 1.0  # interval bangun loop saat senyap (cek deadline)
+    recorder_heartbeat_seconds: int = 15  # interval log heartbeat (anti-freeze)
 
     # --- paper trading ---
     paper_trading: bool = True
@@ -204,6 +207,8 @@ class Settings(BaseSettings):
         "polygon_rpc_timeout_seconds",
         "book_sample_ms",
         "book_finegrain_sec",
+        "book_drain_seconds",
+        "recorder_heartbeat_seconds",
     )
     @classmethod
     def _check_positive_int(cls, v: int, info: object) -> int:
@@ -211,6 +216,14 @@ class Settings(BaseSettings):
         if v <= 0:
             field_name = getattr(info, "field_name", "value")
             raise ValueError(f"{field_name} harus > 0, dapat {v}")
+        return v
+
+    @field_validator("book_poll_seconds")
+    @classmethod
+    def _check_poll_seconds(cls, v: float) -> float:
+        """Interval poll harus > 0."""
+        if v <= 0:
+            raise ValueError(f"book_poll_seconds harus > 0, dapat {v}")
         return v
 
     @field_validator("book_persist_mode")

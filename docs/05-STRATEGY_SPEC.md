@@ -47,8 +47,8 @@ ENTRY hanya jika: net_edge >= MIN_EDGE
 > ✅ **Terverifikasi (live, KRITIS)**: market crypto up/down BERBIAYA —
 > `feesEnabled:true`, `feeType:"crypto_fees_v2"`, `rate:0.07`, `takerOnly:true`.
 > `fees_per_share` **bukan nol**: hitung dari fee taker ~7% via modul
-> `signal/fees.py` (pluggable, default konservatif `FEE_RATE=0.07`;
-> `# TODO reverse-engineer base notional vs profit — calibrate G1`). Semua
+> `signal/fees.py` (formula `crypto_fees_v2` terverifikasi:
+> `fee_per_share = rate * min(p, 1-p)`, default `FEE_RATE=0.07`). Semua
 > net_edge/PnL/backtest/paper/live WAJIB net-of-fee.
 > Insight kunci: entry menguntungkan hanya bila `p_win > ask_win + fee + slippage`.
 > Jika market efisien, `ask_win ≈ p_win` ⇒ `net_edge ≤ 0`. Backtest harus

@@ -187,6 +187,9 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
         book_persist_mode=settings.book_persist_mode,
         book_sample_ms=settings.book_sample_ms,
         book_finegrain_sec=settings.book_finegrain_sec,
+        drain_seconds=settings.book_drain_seconds,
+        poll_seconds=settings.book_poll_seconds,
+        heartbeat_seconds=settings.recorder_heartbeat_seconds,
     )
     ws.set_event_sink(recorder.on_circuit_event)
     resolver = Resolver(store, gamma, clock, price_source=price_source)

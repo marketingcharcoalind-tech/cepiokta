@@ -11,8 +11,12 @@ via :meth:`Recorder.on_circuit_event` dan ditulis sebagai penanda *gap* di
 
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
+
+import structlog
 
 from btcbot.adapters.clob_ws import CircuitEvent, EventType
 from btcbot.domain.models import RoundStatus, Signal
@@ -51,6 +55,10 @@ class Recorder:
         book_persist_mode: ``"changes"`` (write-on-change + throttle) | ``"all"``.
         book_sample_ms: Throttle — maks 1 baris/token per interval ini (ms).
         book_finegrain_sec: Bila ``window_end - now <= ini`` → throttle OFF.
+        drain_seconds: Tahan ``consume_market`` ``window_end + ini`` (tangkap
+            settlement akhir) sebelum berhenti.
+        poll_seconds: Interval bangun loop saat senyap (cek deadline/heartbeat).
+        heartbeat_seconds: Interval log ``heartbeat`` (visibilitas anti-freeze).
     """
 
     def __init__(  # noqa: PLR0913
@@ -64,6 +72,9 @@ class Recorder:
         book_persist_mode: str = "changes",
         book_sample_ms: int = 1000,
         book_finegrain_sec: int = 45,
+        drain_seconds: int = 3,
+        poll_seconds: float = 1.0,
+        heartbeat_seconds: int = 15,
     ) -> None:
         self._store = store
         self._ws = ws
@@ -73,6 +84,9 @@ class Recorder:
         self._persist_mode = book_persist_mode
         self._sample_ms = book_sample_ms
         self._finegrain_sec = book_finegrain_sec
+        self._drain_seconds = drain_seconds
+        self._poll_seconds = poll_seconds
+        self._heartbeat_seconds = heartbeat_seconds
         self._pending_gaps: list[CircuitEvent] = []
         # State retensi per token (untuk satu ronde): (best_bid, best_ask, ts_ms).
         self._last_persist: dict[str, tuple[Decimal | None, Decimal | None, int]] = {}
@@ -158,7 +172,7 @@ class Recorder:
             count += 1
         return count
 
-    async def consume_market(
+    async def consume_market(  # noqa: PLR0912 - loop kontrol kohesif (deadline/poll/persist)
         self,
         round_no: int,
         token_ids: list[str],
@@ -168,13 +182,17 @@ class Recorder:
     ) -> int:
         """Rekam snapshot orderbook dengan retensi write-time (lihat kelas).
 
-        Order book di adapter tetap akurat tiap event; di sini hanya keputusan
-        PERSISTENSI yang di-throttle:
-        - selalu tulis bila best_bid/best_ask berubah, atau snapshot pertama;
-        - bila best sama → maks 1 tulis/token per ``book_sample_ms``;
-        - bila ``window_end - now <= book_finegrain_sec`` → throttle OFF;
-        - snapshot TERAKHIR tiap token selalu ditulis (penanda penutup).
-        Mode ``"all"`` → bypass throttle (tulis semua, regresi perilaku lama).
+        **Berhenti tegas** di ``deadline = window_end + drain_seconds`` (menangkap
+        settlement akhir). Karena ``stream_market`` MEMBLOK saat market senyap
+        (window tutup → reconnect abadi), loop TIDAK mengandalkan ``async for``:
+        iterasi manual dgn ``asyncio.wait_for`` agar bangun tiap ``poll_seconds``
+        untuk cek deadline/heartbeat meski tak ada pesan. ``stream.aclose()`` di
+        ``finally`` WAJIB → menghentikan reconnect abadi di latar.
+
+        Bila ``window_end`` None → perilaku lama (limit-only, blocking).
+
+        Retensi persistensi (lihat kelas): write-on-change + throttle + fine-grain
+        akhir-window; snapshot TERAKHIR tiap token selalu ditulis (penanda penutup).
 
         Mengembalikan jumlah baris yang ditulis. ``limit`` membatasi jumlah
         update yang dikonsumsi (bukan jumlah tulis).
@@ -184,19 +202,52 @@ class Recorder:
         persisted_latest: dict[str, bool] = {}
         written = 0
         consumed = 0
+        log = structlog.get_logger()
+        deadline = (
+            window_end + timedelta(seconds=self._drain_seconds) if window_end is not None else None
+        )
+        last_hb = self._clock.now()
+        last_book: OrderBook | None = None
 
-        async for book in self._ws.stream_market(token_ids):
-            consumed += 1
-            now = self._clock.now()
-            latest[book.token_id] = book
-            if self._should_persist(book, window_end, now):
-                await self._persist_book(round_no, book, now)
-                persisted_latest[book.token_id] = True
-                written += 1
-            else:
-                persisted_latest[book.token_id] = False
-            if limit is not None and consumed >= limit:
-                break
+        stream = self._ws.stream_market(token_ids)
+        try:
+            while True:
+                now = self._clock.now()
+                if deadline is not None:
+                    remaining = (deadline - now).total_seconds()
+                    if remaining <= 0:
+                        break
+                    timeout: float | None = min(remaining, self._poll_seconds)
+                else:
+                    timeout = None
+
+                last_hb = self._maybe_heartbeat(
+                    log, round_no, now, last_hb, consumed, written, last_book, deadline
+                )
+
+                try:
+                    book = await asyncio.wait_for(stream.__anext__(), timeout=timeout)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    continue  # bangun untuk cek deadline/heartbeat walau senyap
+
+                consumed += 1
+                now = self._clock.now()
+                latest[book.token_id] = book
+                last_book = book
+                if self._should_persist(book, window_end, now):
+                    await self._persist_book(round_no, book, now)
+                    persisted_latest[book.token_id] = True
+                    written += 1
+                else:
+                    persisted_latest[book.token_id] = False
+                if limit is not None and consumed >= limit:
+                    break
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()  # hentikan generator → stop reconnect abadi
 
         # Penanda penutup: pastikan snapshot TERAKHIR tiap token tersimpan.
         for token, book in latest.items():
@@ -206,6 +257,36 @@ class Recorder:
 
         await self.flush_gaps(round_no)
         return written
+
+    def _maybe_heartbeat(  # noqa: PLR0913
+        self,
+        log: structlog.typing.FilteringBoundLogger,
+        round_no: int,
+        now: datetime,
+        last_hb: datetime,
+        consumed: int,
+        written: int,
+        last_book: OrderBook | None,
+        deadline: datetime | None,
+    ) -> datetime:
+        """Log ``heartbeat`` tiap ``heartbeat_seconds`` (visibilitas anti-freeze).
+
+        Kembalikan ``last_hb`` baru (diperbarui bila heartbeat dipancarkan).
+        """
+        if (now - last_hb).total_seconds() < self._heartbeat_seconds:
+            return last_hb
+        best_bid, best_ask = _best(last_book) if last_book is not None else (None, None)
+        seconds_left = (deadline - now).total_seconds() if deadline is not None else None
+        log.info(
+            "heartbeat",
+            round_no=round_no,
+            consumed=consumed,
+            written=written,
+            best_bid=None if best_bid is None else str(best_bid),
+            best_ask=None if best_ask is None else str(best_ask),
+            seconds_left=seconds_left,
+        )
+        return now
 
     def _should_persist(
         self,

@@ -18,9 +18,19 @@ class TestProportionalTakerFee:
     def test_default_rate_is_seven_percent(self) -> None:
         assert ProportionalTakerFee().rate == DEFAULT_FEE_RATE == Decimal("0.07")
 
-    def test_fee_is_rate_times_price(self) -> None:
+    def test_fee_is_rate_times_min_p(self) -> None:
         fee = ProportionalTakerFee(Decimal("0.07"))
-        assert fee.fee_per_share(Decimal("0.90")) == Decimal("0.063")
+        # fee = rate * min(price, 1-price); price 0.90 → 0.07 * 0.10 = 0.007
+        assert fee.fee_per_share(Decimal("0.90")) == Decimal("0.007")
+
+    def test_fee_symmetric_max_at_half(self) -> None:
+        fee = ProportionalTakerFee(Decimal("0.07"))
+        assert fee.fee_per_share(Decimal("0.50")) == Decimal("0.035")  # rate/2 (maks)
+        assert fee.fee_per_share(Decimal("0.20")) == fee.fee_per_share(Decimal("0.80"))
+
+    def test_fee_small_near_extreme(self) -> None:
+        fee = ProportionalTakerFee(Decimal("0.07"))
+        assert fee.fee_per_share(Decimal("0.99")) == Decimal("0.0007")  # 0.07 * 0.01
 
     def test_fee_never_negative(self) -> None:
         fee = ProportionalTakerFee()

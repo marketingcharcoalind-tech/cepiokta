@@ -5,13 +5,10 @@ up/down **BERBIAYA** — ``feesEnabled:true``, ``feeType:"crypto_fees_v2"``,
 ``rate:0.07``, ``takerOnly:true``. **Asumsi zero-fee SALAH**; semua ``net_edge``/
 PnL/backtest/paper/live WAJIB net-of-fee.
 
-Formula presisi ``crypto_fees_v2`` (base notional vs profit) belum di-reverse-
-engineer — itu pekerjaan kalibrasi **G1**. Sampai itu, gunakan model konservatif
-:class:`ProportionalTakerFee` (fee = ``rate * price`` per share) yang cenderung
-**melebih-lebihkan** biaya (aman: tidak mendorong over-trading). Model bersifat
-*pluggable* via :class:`FeeModel` agar formula sebenarnya bisa di-drop-in tanpa
-mengubah pemanggil. :class:`ZeroFee` disediakan khusus untuk **ablation**
-(docs/09 §9.4: PnL dengan vs tanpa fee).
+Formula ``crypto_fees_v2`` (terverifikasi): ``fee_per_share = rate * min(p, 1-p)``
+dengan ``rate`` default ``0.07`` (7%). Simetris: maksimum di ``p=0.5``, menuju 0
+di ekstrem. Model konservatif & *pluggable* via :class:`FeeModel`. :class:`ZeroFee`
+disediakan khusus untuk **ablation** (docs/09 §9.4: PnL dengan vs tanpa fee).
 
 Domain murni: tidak mengimpor Settings. Lapisan ``app`` menyuntikkan
 ``Settings.fee_rate`` saat membangun model.
@@ -42,17 +39,18 @@ class FeeModel(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ProportionalTakerFee:
-    """Model konservatif: ``fee_per_share = rate * price``.
+    """Model fee taker ``crypto_fees_v2``: ``fee_per_share = rate * min(price, 1-price)``.
+
+    Formula terverifikasi Polymarket (crypto up/down): fee per share simetris —
+    maksimum di ``price=0.5`` (``rate/2``) dan mendekati 0 di ekstrem (0/1).
+    Untuk entry near-settlement (``price`` 0.80-0.99) fee jadi kecil
+    (``rate * (1-price)``), tetapi TIDAK nol (asumsi zero-fee SALAH).
 
     Args:
-        rate: Tarif fee taker (default ``0.07`` = 7%). Wajib di ``[0, 1)``.
+        rate: Tarif fee taker dasar (default ``0.07`` = 7%). Wajib di ``[0, 1)``.
 
     Raises:
         ValueError: bila ``rate`` di luar ``[0, 1)``.
-
-    Note:
-        ``# TODO`` reverse-engineer ``crypto_fees_v2`` (base notional vs profit)
-        lalu ganti formula ini — kalibrasi di G1.
     """
 
     rate: Decimal = DEFAULT_FEE_RATE
@@ -62,8 +60,8 @@ class ProportionalTakerFee:
             raise ValueError(f"rate harus di [0, 1), dapat {self.rate}")
 
     def fee_per_share(self, price: Decimal) -> Decimal:
-        """Biaya per share = ``rate * price`` (tidak pernah negatif)."""
-        return self.rate * price
+        """Biaya per share = ``rate * min(price, 1 - price)`` (tidak pernah negatif)."""
+        return self.rate * min(price, Decimal("1") - price)
 
 
 @dataclass(frozen=True, slots=True)
