@@ -1,0 +1,34 @@
+{
+  "id": "2681746",
+  "question": "Bitcoin Up or Down - June 26, 9:20AM-9:25AM ET",
+  "conditionId": "0x3cf44e35cdf98d2b9bc925f6300e5a27d2e277f9ec3283e9a8b2e7ff0d3b8ad8",
+  "slug": "btc-updown-5m-1782480000",
+  "resolutionSource": "https://data.chain.link/streams/btc-usd",
+  "endDate": "2026-06-26T13:20:00Z",
+  "startDate": "2026-06-25T12:54:13.645538Z",
+  "outcomes": "[\"Up\", \"Down\"]",
+  "outcomePrices": "[\"0.925\", \"0.075\"]",
+  "active": true,
+  "closed": false,
+  "enableOrderBook": true,
+  "orderPriceMinTickSize": 0.01,
+  "orderMinSize": 5,
+  "clobTokenIds": "[\"66691872589090321857359760553365923055683771221599691881462031886859925029011\", \"103824901148608559477141957681986226692251143360641051787508866661083077785923\"]",
+  "events": [
+    {
+      "id": "633171",
+      "slug": "btc-updown-5m-1782480000",
+      "startTime": "2026-06-26T13:15:00Z",
+      "endDate": "2026-06-26T13:20:00Z"
+    }
+  ],
+  "eventStartTime": "2026-06-26T13:15:00Z",
+  "feesEnabled": true,
+  "feeType": "crypto_fees_v2",
+  "feeSchedule": {
+    "exponent": 1,
+    "rate": 0.07,
+    "takerOnly": true,
+    "rebateRate": 0.2
+  }
+}

@@ -76,8 +76,9 @@ class Settings(BaseSettings):
     flip_ratio: Decimal = Decimal("0.90")
     hedge_fraction: Decimal = Decimal("0.5")
     p_exit: Decimal = Decimal("0.65")  # hedge/exit bila p_win sisi held < ini
-    # Fee taker crypto_fees_v2 (terverifikasi ~7%); dipakai signal/sizing net-of-fee.
+    # Fee taker crypto_fees_v2 (terverifikasi): fee=rate*min(p,1-p)^exponent.
     fee_rate: Decimal = Decimal("0.07")
+    fee_exponent: int = 1
 
     # --- sizing & risk (lihat docs/06) ---
     bankroll_floor: Decimal = Decimal("50")
@@ -209,6 +210,7 @@ class Settings(BaseSettings):
         "book_finegrain_sec",
         "book_drain_seconds",
         "recorder_heartbeat_seconds",
+        "fee_exponent",
     )
     @classmethod
     def _check_positive_int(cls, v: int, info: object) -> int:

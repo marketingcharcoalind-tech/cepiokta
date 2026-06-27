@@ -190,7 +190,7 @@ class ReplayConfig:
             params=StrategyParams.from_settings(settings, delta_threshold=delta_threshold),
             vol=settings.backtest_vol_per_sqrt_sec,
             starting_balance=settings.paper_starting_balance,
-            fee_model=ProportionalTakerFee(settings.fee_rate),
+            fee_model=ProportionalTakerFee(settings.fee_rate, settings.fee_exponent),
             latency_ticks=settings.backtest_latency_ticks,
             competition_fraction=settings.backtest_competition_fraction,
             seed=settings.backtest_seed,
