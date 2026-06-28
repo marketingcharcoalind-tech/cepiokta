@@ -129,10 +129,12 @@ Fase 4 [          ] 0/3     G4: belum
 | B1 | CLOB **REST** V2 (order/signing) belum diverifikasi | 2026-06-25 | blokir Fase 3 (live) | cek docs resmi Polymarket (docs/04 §4.8) | 🟦 |
 | B1-ws | CLOB **WS market** parser + keepalive — RESOLVED | 2026-06-26 | — | path `/ws/market`; parse LIST snapshot + `price_change`; keepalive: ping_interval=None + heartbeat "PING" 10s + stale 30s reconnect | ✅ |
 | B2b | Adapter Chainlink **Data Streams** BTC/USD (akurasi harga akhir-window) | 2026-06-25 | akurasi resolusi/edge; sumber resolusi asli market | bangun di Fase 1 (lihat task lanjutan) | 🟦 |
-| F1-fee | Reverse-engineer formula `crypto_fees_v2` → masukkan ke net_edge | 2026-06-25 | market berbiaya; edge harus net setelah fee | modul `domain/fees.py` pluggable + default konservatif 7% (`FEE_RATE`) SUDAH masuk signal; reverse-engineer formula presisi → kalibrasi G1 | 🟦 |
+| F1-fee | crypto_fees_v2 → net_edge — RESOLVED (formula terverifikasi) | 2026-06-25 | — | `fee=rate*min(p,1-p)^exponent` (feeSchedule live: rate 0.07, exponent 1, takerOnly); `domain/fees.estimate_fee`+`CryptoFeesV2`; fixture `gamma_fee_schedule.json`; dipakai signal/sizing/replay net-of-fee | ✅ |
 | B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader + RPC failover) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity; FailoverPriceSource primary+fallbacks, UA browser | ✅ |
 | B3 | Gamma discovery — RESOLVED (slug-based + window benar + fee parsed) | 2026-06-25 | — | regex slug `asset-updown-tf-epoch`; window dari eventStartTime/endDate (bukan startDate); query end_date window + UA browser | ✅ |
 | RES | Resolution recorder — RESOLVED (label outcome ronde) | 2026-06-26 | — | Gamma primer + Chainlink cross-check; settlement_price/resolution_source; resolve_due + `--resolve-backfill`; mismatch di-log | ✅ |
+| B-freeze | Recorder freeze — RESOLVED (consume_market gantung saat window tutup) | 2026-06-27 | soak mati 18 jam | deadline window_end+drain; iterasi manual + wait_for poll; aclose stream stop reconnect abadi; heartbeat | ✅ |
+| B4 | Discovery crash — RESOLVED (GammaError transient mematikan soak) | 2026-06-27 | soak mati saat gap window/hiccup Gamma | `app/discovery.discover_with_retry`: retry tak terbatas + backoff 1→2→5→cap (`GAMMA_DISCOVERY_MAX_BACKOFF_SECONDS`); transient(GammaError) retry vs fatal(auth/config) raise; log `discover_retry` | ✅ |
 
 ## 🧠 Decision Log (ADR ringkas)
 | Tgl | Keputusan | Alasan | ADR file |

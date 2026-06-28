@@ -26,6 +26,7 @@ from btcbot.adapters.clob_ws import HttpClobWS
 from btcbot.adapters.clock import SystemClock
 from btcbot.adapters.gamma import HttpGammaClient
 from btcbot.app.demo import build_demo_runtime
+from btcbot.app.discovery import discover_with_retry
 from btcbot.config.settings import Settings, get_settings
 from btcbot.data.recorder import Recorder
 from btcbot.data.resolver import Resolver
@@ -98,7 +99,10 @@ async def run_readonly(  # noqa: PLR0913
             log.info("shutdown_requested", processed=processed)
             break
 
-        meta = await gamma.discover_active_round()
+        meta = await discover_with_retry(gamma, settings=settings, shutdown=shutdown, logger=log)
+        if meta is None:
+            log.info("shutdown_requested", processed=processed)
+            break
 
         # start_price = harga BTC saat ronde ditemukan (Chainlink). Bila harga
         # tidak tersedia, JANGAN mengarang: lewati ronde ini (akan dicoba lagi).

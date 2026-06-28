@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     ws_app_ping_seconds: int = 10
     ws_stale_seconds: int = 30
     resolve_poll_seconds: int = 30
+    # Discovery resilien (Bug B4): kegagalan transient TIDAK mematikan soak.
+    gamma_discovery_retry: bool = True
+    gamma_discovery_max_backoff_seconds: int = 15
 
     # --- strategy params (lihat docs/05) ---
     t_entry_sec: int = 20
@@ -205,6 +208,7 @@ class Settings(BaseSettings):
         "ws_app_ping_seconds",
         "ws_stale_seconds",
         "resolve_poll_seconds",
+        "gamma_discovery_max_backoff_seconds",
         "polygon_rpc_timeout_seconds",
         "book_sample_ms",
         "book_finegrain_sec",
