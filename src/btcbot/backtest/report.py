@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -24,7 +25,9 @@ from btcbot.backtest.replay import (
     ReplayConfig,
     ReplayEngine,
     ReplaySummary,
+    RunAccumulator,
     load_round_replays,
+    stream_accumulators,
 )
 from btcbot.config.settings import Settings, get_settings
 from btcbot.data.store import Store
@@ -456,6 +459,72 @@ def format_g1_preview(report: BacktestReport, min_rounds: int) -> str:
     )
 
 
+def _ablation_configs(base: ReplayConfig) -> list[tuple[str, ReplayConfig]]:
+    """Empat varian ablation (config saja; dijalankan streaming SATU pass)."""
+    return [
+        ("baseline (fee+slippage+latency)", base),
+        ("no_fee", replace(base, fee_model=ZeroFee())),
+        ("no_slippage", replace(base, slippage_enabled=False)),
+        ("no_latency", replace(base, latency_ticks=0)),
+    ]
+
+
+def _grid_configs(
+    base: ReplayConfig,
+    t_entry_values: Sequence[int],
+    delta_values: Sequence[Decimal],
+    max_price_values: Sequence[Decimal],
+) -> list[tuple[tuple[int, Decimal, Decimal], ReplayConfig]]:
+    """Config per sel grid (T_ENTRY x DELTA x MAX_PRICE)."""
+    out: list[tuple[tuple[int, Decimal, Decimal], ReplayConfig]] = []
+    for t_entry in t_entry_values:
+        for delta in delta_values:
+            for max_price in max_price_values:
+                params = replace(
+                    base.params,
+                    t_entry_sec=t_entry,
+                    delta_threshold=delta,
+                    max_price=max_price,
+                )
+                limits = replace(base.limits, max_price=max_price)
+                out.append(
+                    ((t_entry, delta, max_price), replace(base, params=params, limits=limits))
+                )
+    return out
+
+
+def _ablation_row_from_summary(
+    name: str, summary: ReplaySummary, starting_balance: Decimal
+) -> AblationRow:
+    entered = summary.rounds_entered
+    return AblationRow(
+        name=name,
+        rounds_entered=entered,
+        net_pnl=summary.total_pnl,
+        roi=(summary.total_pnl / starting_balance if starting_balance > _ZERO else _ZERO),
+        win_rate=(Decimal(summary.wins) / Decimal(entered) if entered else _ZERO),
+    )
+
+
+def _grid_cell_from_summary(
+    key: tuple[int, Decimal, Decimal], summary: ReplaySummary, starting_balance: Decimal
+) -> GridCell:
+    t_entry, delta, max_price = key
+    entered = summary.rounds_entered
+    return GridCell(
+        t_entry_sec=t_entry,
+        delta_threshold=delta,
+        max_price=max_price,
+        rounds_entered=entered,
+        net_pnl=summary.total_pnl,
+        roi=(summary.total_pnl / starting_balance if starting_balance > _ZERO else _ZERO),
+        win_rate=(Decimal(summary.wins) / Decimal(entered) if entered else _ZERO),
+    )
+
+
+_GRID_DEFAULT_LIMIT = 50
+
+
 async def generate_report(  # noqa: PLR0913 - flag CLI eksplisit
     settings: Settings,
     *,
@@ -470,39 +539,73 @@ async def generate_report(  # noqa: PLR0913 - flag CLI eksplisit
     delta_values: Sequence[Decimal] = _DEFAULT_DELTA_GRID,
     max_price_values: Sequence[Decimal] = _DEFAULT_MAX_PRICE,
     min_rounds: int = _DEFAULT_MIN_ROUNDS,
+    limit: int | None = None,
 ) -> str:
-    """Muat ronde resolved + tick, jalankan replay, rakit teks laporan + G1 preview."""
-    db_url = db or settings.db_url
-    store = await Store.open(db_url)
+    """Stream ronde resolved (filter pushdown SQL), rakit laporan + G1 preview.
+
+    Memori ~konstan: ablation & grid dijalankan dalam SATU pass streaming
+    (multi-akumulator), ticks tiap ronde di-GC setelah diproses.
+    """
+    base = ReplayConfig.from_settings(settings, delta_threshold=_resolve_delta(settings, delta))
+    sb = starting_balance if starting_balance is not None else settings.paper_starting_balance
+    base = replace(base, starting_balance=sb)
+
+    main_acc = RunAccumulator(base)
+    accs: list[RunAccumulator] = [main_acc]
+    ablation_specs: list[tuple[str, RunAccumulator]] = []
+    grid_specs: list[tuple[tuple[int, Decimal, Decimal], RunAccumulator]] = []
+
+    if with_ablation:
+        for name, cfg in _ablation_configs(base):
+            acc = RunAccumulator(cfg)
+            ablation_specs.append((name, acc))
+            accs.append(acc)
+
+    effective_limit = limit
+    if with_grid:
+        if effective_limit is None:
+            effective_limit = _GRID_DEFAULT_LIMIT
+            print(  # noqa: T201 - peringatan ke stderr
+                f"[warn] --grid tanpa --max-rounds → batasi {_GRID_DEFAULT_LIMIT} ronde terbaru "
+                "(set --max-rounds untuk override)",
+                file=sys.stderr,
+            )
+        for key, cfg in _grid_configs(base, t_entry_values, delta_values, max_price_values):
+            acc = RunAccumulator(cfg)
+            grid_specs.append((key, acc))
+            accs.append(acc)
+
+    def _progress(n: int) -> None:
+        if n % 100 == 0:
+            print(f"[progress] processed {n} rounds", file=sys.stderr)  # noqa: T201
+
+    store = await Store.open(db or settings.db_url)
     try:
-        loaded = await load_round_replays(store)
+        rounds = load_round_replays(store, since=since, until=until, limit=effective_limit)
+        processed = await stream_accumulators(accs, rounds, on_progress=_progress)
     finally:
         await store.close()
 
-    rounds = filter_rounds(loaded, since=since, until=until)
-    if not rounds:
+    if processed == 0:
         return (
             "Tidak ada ronde berlabel (status='resolved') di DB untuk rentang ini.\n"
             "Rekam data (readonly) lalu `--resolve-backfill`, baru jalankan laporan ini."
         )
 
-    base = ReplayConfig.from_settings(settings, delta_threshold=_resolve_delta(settings, delta))
-    sb = starting_balance if starting_balance is not None else settings.paper_starting_balance
-    base = replace(base, starting_balance=sb)
-
-    summary = ReplayEngine(base).run(rounds)
-    report = build_report(summary, base.starting_balance)
+    print(f"[progress] selesai: {processed} ronde diproses", file=sys.stderr)  # noqa: T201
+    report = build_report(main_acc.summary(), base.starting_balance)
     sections = [format_report(report)]
     if with_ablation:
-        sections.append(format_ablation(ablation(rounds, base)))
+        rows = [
+            _ablation_row_from_summary(name, acc.summary(), base.starting_balance)
+            for name, acc in ablation_specs
+        ]
+        sections.append(format_ablation(rows))
     if with_grid:
-        cells = sensitivity_grid(
-            rounds,
-            base,
-            t_entry_values=t_entry_values,
-            delta_values=delta_values,
-            max_price_values=max_price_values,
-        )
+        cells = [
+            _grid_cell_from_summary(key, acc.summary(), base.starting_balance)
+            for key, acc in grid_specs
+        ]
         sections.append(format_grid(cells))
     sections.append(format_g1_preview(report, min_rounds))
     return "\n\n".join(sections)
@@ -529,6 +632,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--delta", default=None, help="delta_threshold baseline ('auto'→0)")
     p.add_argument("--ablation", action="store_true", help="cetak tabel ablation")
     p.add_argument("--grid", action="store_true", help="cetak sensitivity grid")
+    p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        help="batasi N ronde TERBARU (limit SQL; hemat RAM)",
+    )
     p.add_argument("--t-entry", default=None, help="grid T_ENTRY_SEC (mis. 60,45,30,15)")
     p.add_argument("--delta-grid", default=None, help="grid DELTA_THRESHOLD (mis. 0.02,0.05,0.10)")
     p.add_argument("--max-price", default=None, help="grid MAX_PRICE (mis. 0.90,0.95,0.98)")
@@ -568,6 +677,7 @@ def main(argv: list[str] | None = None) -> int:
             delta_values=_dec_list(args.delta_grid) if args.delta_grid else _DEFAULT_DELTA_GRID,
             max_price_values=_dec_list(args.max_price) if args.max_price else _DEFAULT_MAX_PRICE,
             min_rounds=args.min_rounds,
+            limit=args.max_rounds,
         )
     )
     print(text)  # noqa: T201 - output laporan ke stdout

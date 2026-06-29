@@ -10,6 +10,8 @@ from btcbot.backtest.replay import (
     ReplayConfig,
     ReplayEngine,
     ReplayTick,
+    RunAccumulator,
+    load_round_replays,
     reconstruct_ticks,
     run_and_persist,
     simulate_fill,
@@ -391,3 +393,137 @@ class TestRunAndPersist:
             assert len(equity) >= 1
         finally:
             await store.close()
+
+
+# ----- B7: streaming loader + numeric regression -----
+
+
+class _CountingStore:
+    """Store palsu: hitung pemanggilan get_book_snapshots (bukti tak load semua)."""
+
+    def __init__(self, rounds: list[Round]) -> None:
+        self._rounds = rounds
+        self.book_calls = 0
+        self.concurrent = 0
+        self.max_concurrent = 0
+
+    async def get_resolved_rounds(
+        self,
+        *,
+        since: object = None,
+        until: object = None,
+        limit: int | None = None,
+    ) -> list[Round]:
+        rs = self._rounds
+        if limit is not None:
+            rs = rs[-limit:]
+        return list(rs)
+
+    async def get_book_snapshots(self, round_no: int) -> list[BookSnapshot]:
+        self.book_calls += 1
+        self.concurrent += 1
+        self.max_concurrent = max(self.max_concurrent, self.concurrent)
+        ts = WINDOW_END - timedelta(seconds=10)
+        snaps = [
+            BookSnapshot(
+                round_no,
+                UP,
+                ts,
+                Decimal("0.88"),
+                Decimal("0.90"),
+                Decimal("100"),
+                Decimal("100"),
+                False,
+                None,
+                "readonly",
+            ),
+            BookSnapshot(
+                round_no,
+                DOWN,
+                ts,
+                Decimal("0.08"),
+                Decimal("0.12"),
+                Decimal("100"),
+                Decimal("100"),
+                False,
+                None,
+                "readonly",
+            ),
+        ]
+        self.concurrent -= 1
+        return snaps
+
+    async def get_signals(self, round_no: int) -> list[Signal]:
+        ts = WINDOW_END - timedelta(seconds=10)
+        return [
+            Signal(
+                round_no,
+                ts,
+                Decimal("65120"),
+                Decimal("120"),
+                10.0,
+                Decimal("0"),
+                "UP",
+                Decimal("0"),
+                Decimal("0"),
+            )
+        ]
+
+
+def _resolved_round(i: int) -> Round:
+    return Round(
+        condition_id=f"0xc{i}",
+        round_no=1782480000 + i * 300,
+        token_id_up=UP,
+        token_id_down=DOWN,
+        window_start=WINDOW_START,
+        window_end=WINDOW_END,
+        start_price=Decimal("65000"),
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        status=RoundStatus.RESOLVED,
+        resolved_outcome=Outcome.UP,
+    )
+
+
+class TestStreamingLoader:
+    async def test_loader_is_async_generator_lazy(self) -> None:
+        store = _CountingStore([_resolved_round(i) for i in range(5)])
+        gen = load_round_replays(store)  # type: ignore[arg-type]
+        # Sebelum iterasi: belum ada get_book_snapshots dipanggil.
+        assert store.book_calls == 0
+        seen = 0
+        async for _rnd, _ticks in gen:
+            seen += 1
+        assert seen == 5
+        assert store.book_calls == 5  # satu per ronde
+        assert store.max_concurrent == 1  # hanya 1 ronde "aktif" bersamaan
+
+    async def test_limit_loads_only_filtered(self) -> None:
+        store = _CountingStore([_resolved_round(i) for i in range(10)])
+        seen = 0
+        async for _r, _t in load_round_replays(store, limit=3):  # type: ignore[arg-type]
+            seen += 1
+        assert seen == 3
+        assert store.book_calls == 3  # BUKAN 10 — hemat RAM
+
+    async def test_streaming_summary_identical_to_run(self) -> None:
+        # Regresi angka: RunAccumulator streaming == ReplayEngine.run(list) IDENTIK.
+        rounds = [(_resolved_round(i), winning_ticks()) for i in range(4)]
+        cfg = make_config()
+
+        old = ReplayEngine(cfg).run(rounds)
+
+        acc = RunAccumulator(cfg)
+        for rnd, ticks in rounds:
+            acc.feed(rnd, ticks)
+        new = acc.summary()
+
+        assert new.rounds_total == old.rounds_total
+        assert new.rounds_entered == old.rounds_entered
+        assert new.wins == old.wins
+        assert new.losses == old.losses
+        assert new.total_pnl == old.total_pnl
+        assert new.final_balance == old.final_balance
+        assert new.results == old.results
+        assert new.diagnostics == old.diagnostics

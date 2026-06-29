@@ -53,7 +53,7 @@ from btcbot.domain.strategy import (
 from btcbot.exec.sizing import SizingLimits, round_to_tick, size
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
     from datetime import datetime
 
     from btcbot.config.settings import Settings
@@ -272,10 +272,10 @@ class ReplayEngine:
         Settlement memakai ``rnd.resolved_outcome`` (label Gamma). ``None`` bila
         ronde belum resolved atau tak ada tick.
         """
-        detailed = self._simulate(rnd, ticks, bankroll=bankroll)
+        detailed = self.simulate(rnd, ticks, bankroll=bankroll)
         return None if detailed is None else detailed[0]
 
-    def _simulate(
+    def simulate(
         self,
         rnd: Round,
         ticks: Sequence[ReplayTick],
@@ -345,7 +345,7 @@ class ReplayEngine:
         diagnostics: list[RoundDiagnostics] = []
         wins = losses = entered = 0
         for rnd, ticks in rounds:
-            detailed = self._simulate(rnd, ticks, bankroll=balance)
+            detailed = self.simulate(rnd, ticks, bankroll=balance)
             if detailed is None:
                 continue
             res, diag = detailed
@@ -611,46 +611,117 @@ def reconstruct_ticks(
 async def load_round_replays(
     store: Store,
     *,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int | None = None,
-) -> list[tuple[Round, list[ReplayTick]]]:
-    """Muat ronde resolved + tick replay-nya dari :class:`Store`.
+) -> AsyncIterator[tuple[Round, list[ReplayTick]]]:
+    """Stream ronde resolved + tick replay-nya dari :class:`Store` (memori ~konstan).
 
-    Hanya ronde berlabel Gamma (``resolved_outcome`` terisi) dengan minimal satu
-    tick yang disertakan. Ronde tanpa data book di-skip.
+    **Async generator** (Bug B7): muat metadata ronde sekali (ringan, tanpa book),
+    lalu PER RONDE muat ``book_snapshots`` + ``signals`` → ``reconstruct_ticks`` →
+    ``yield`` → ticks ronde itu boleh di-GC sebelum ronde berikutnya. Filter
+    ``since``/``until``/``limit`` di-pushdown ke SQL (lihat
+    :meth:`Store.get_resolved_rounds`), bukan di Python.
+
+    Hanya ronde berlabel Gamma dengan minimal satu tick yang di-yield.
     """
-    rounds = await store.get_resolved_rounds(limit=limit)
-    out: list[tuple[Round, list[ReplayTick]]] = []
+    rounds = await store.get_resolved_rounds(since=since, until=until, limit=limit)
     for rnd in rounds:
         snaps = await store.get_book_snapshots(rnd.round_no)
         sigs = await store.get_signals(rnd.round_no)
         ticks = reconstruct_ticks(rnd, snaps, sigs)
         if ticks:
-            out.append((rnd, ticks))
-    return out
+            yield rnd, ticks
+
+
+class RunAccumulator:
+    """Akumulator statistik replay **streaming** untuk SATU config (memori ~konstan).
+
+    Diberi makan satu ronde via :meth:`feed`; ticks tidak disimpan (boleh di-GC
+    setelah feed). Hasil per-ronde (``RoundResult``/``RoundDiagnostics``) ringan
+    dikumpulkan untuk :meth:`summary`. Matematika & threading saldo IDENTIK dengan
+    :meth:`ReplayEngine.run` (urutan ronde sama → hasil sama).
+    """
+
+    def __init__(self, config: ReplayConfig) -> None:
+        self._engine = ReplayEngine(config)
+        self._start = config.starting_balance
+        self._balance = config.starting_balance
+        self._results: list[RoundResult] = []
+        self._diags: list[RoundDiagnostics] = []
+        self._wins = 0
+        self._losses = 0
+        self._entered = 0
+        self._total = 0
+
+    def feed(self, rnd: Round, ticks: Sequence[ReplayTick]) -> RoundResult | None:
+        """Proses satu ronde; akumulasi statistik. Kembalikan RoundResult bila entry."""
+        self._total += 1
+        detailed = self._engine.simulate(rnd, ticks, bankroll=self._balance)
+        if detailed is None:
+            return None
+        res, diag = detailed
+        self._entered += 1
+        self._balance = res.balance_after
+        self._results.append(res)
+        self._diags.append(diag)
+        if res.pnl > _ZERO:
+            self._wins += 1
+        elif res.pnl < _ZERO:
+            self._losses += 1
+        return res
+
+    def summary(self) -> ReplaySummary:
+        """Bangun :class:`ReplaySummary` dari statistik terakumulasi."""
+        return ReplaySummary(
+            rounds_total=self._total,
+            rounds_entered=self._entered,
+            wins=self._wins,
+            losses=self._losses,
+            total_pnl=self._balance - self._start,
+            final_balance=self._balance,
+            results=tuple(self._results),
+            diagnostics=tuple(self._diags),
+        )
+
+
+async def stream_accumulators(
+    accumulators: Sequence[RunAccumulator],
+    rounds: AsyncIterator[tuple[Round, list[ReplayTick]]],
+    *,
+    on_progress: Callable[[int], None] | None = None,
+) -> int:
+    """Feed setiap ronde stream ke SEMUA akumulator dalam SATU pass. Return jumlah ronde.
+
+    Memungkinkan ablation/grid multi-config tanpa memuat ulang DB (ticks tiap
+    ronde diproses semua akumulator lalu di-GC).
+    """
+    processed = 0
+    async for rnd, ticks in rounds:
+        processed += 1
+        for acc in accumulators:
+            acc.feed(rnd, ticks)
+        if on_progress is not None:
+            on_progress(processed)
+    return processed
 
 
 async def run_and_persist(
     store: Store,
     config: ReplayConfig,
     *,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int | None = None,
 ) -> ReplaySummary:
-    """Muat data terekam, jalankan replay, tulis ``round_results`` & ``equity_curve``.
+    """Stream data terekam, jalankan replay, tulis ``round_results`` & ``equity_curve``.
 
-    Menulis dengan ``mode='backtest'``. Mengembalikan :class:`ReplaySummary`.
+    Menulis dengan ``mode='backtest'`` per ronde (streaming, memori ~konstan).
     """
-    engine = ReplayEngine(config)
-    rounds = await load_round_replays(store, limit=limit)
-    summary = engine.run(rounds)
-    for res in summary.results:
-        await store.insert_round_result(res, mode="backtest")
-    # equity_curve: satu titik per ronde ter-entry (urut waktu round_no).
-    balance = config.starting_balance
-    rnd_by_no = {rnd.round_no: rnd for rnd, _ in rounds}
-    for res in summary.results:
-        balance = res.balance_after
-        rnd = rnd_by_no.get(res.round_no)
-        ts = rnd.window_end if rnd is not None else None
-        if ts is not None:
-            await store.insert_equity_point(ts, balance, "backtest")
-    return summary
+    acc = RunAccumulator(config)
+    async for rnd, ticks in load_round_replays(store, since=since, until=until, limit=limit):
+        res = acc.feed(rnd, ticks)
+        if res is not None:
+            await store.insert_round_result(res, mode="backtest")
+            await store.insert_equity_point(rnd.window_end, res.balance_after, "backtest")
+    return acc.summary()

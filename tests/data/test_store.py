@@ -1,7 +1,7 @@
 """Unit tests for btcbot.data.store (SQLite in-memory CRUD)."""
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -305,3 +305,68 @@ class TestEquityCurve:
         points = await store.get_equity_curve()
         assert len(points) == 1
         assert points[0].balance == Decimal("200")
+
+
+class TestGetResolvedRoundsFilter:
+    """Bug B7: filter since/until/limit di-pushdown ke SQL (bukan Python)."""
+
+    async def _seed(self, store: Store, count: int) -> list[datetime]:
+        ends: list[datetime] = []
+        for i in range(count):
+            end = datetime(2026, 6, 26, 13, 0, tzinfo=UTC) + timedelta(minutes=5 * i)
+            rno = int(end.timestamp())
+            rnd = Round(
+                condition_id=f"0xc{i}",
+                round_no=rno,
+                token_id_up=f"u{i}",
+                token_id_down=f"d{i}",
+                window_start=end - timedelta(minutes=5),
+                window_end=end,
+                start_price=Decimal("65000"),
+                tick_size=Decimal("0.01"),
+                min_order_size=Decimal("5"),
+                status=RoundStatus.RESOLVED,
+                resolved_outcome=Outcome.UP,
+            )
+            await store.upsert_round(rnd)
+            await store.set_resolution(rno, Outcome.UP)
+            ends.append(end)
+        return ends
+
+    async def test_no_filter_returns_all_ascending(self, store: Store) -> None:
+        await self._seed(store, 5)
+        rounds = await store.get_resolved_rounds()
+        assert len(rounds) == 5
+        nos = [r.round_no for r in rounds]
+        assert nos == sorted(nos)  # urut naik
+
+    async def test_since_until_inclusive(self, store: Store) -> None:
+        ends = await self._seed(store, 5)  # index 0..4
+        rounds = await store.get_resolved_rounds(since=ends[1], until=ends[3])
+        got = {r.window_end for r in rounds}
+        assert got == {ends[1], ends[2], ends[3]}  # inklusif kedua sisi
+
+    async def test_limit_returns_newest_but_ascending(self, store: Store) -> None:
+        ends = await self._seed(store, 5)
+        rounds = await store.get_resolved_rounds(limit=2)
+        # 2 TERBARU (window_end terbesar) tapi dikembalikan urut naik (compounding).
+        assert [r.window_end for r in rounds] == [ends[3], ends[4]]
+
+    async def test_only_resolved_returned(self, store: Store) -> None:
+        await self._seed(store, 2)
+        # ronde ACTIVE (belum resolved) tak boleh muncul.
+        active = Round(
+            condition_id="0xactive",
+            round_no=999,
+            token_id_up="ua",
+            token_id_down="da",
+            window_start=WS,
+            window_end=WE + timedelta(days=1),
+            start_price=Decimal("65000"),
+            tick_size=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            status=RoundStatus.ACTIVE,
+        )
+        await store.upsert_round(active)
+        rounds = await store.get_resolved_rounds()
+        assert all(r.round_no != 999 for r in rounds)

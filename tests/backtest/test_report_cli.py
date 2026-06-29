@@ -129,6 +129,25 @@ class TestGenerateReport:
         text = await generate_report(_settings(db_path), db=db_path, since=WE + timedelta(hours=1))
         assert "Tidak ada ronde berlabel" in text
 
+    async def test_max_rounds_limits_loaded(self, db_path: str) -> None:
+        # DB punya 3 ronde; limit=1 → hanya 1 ronde di-load & dilaporkan.
+        text = await generate_report(_settings(db_path), db=db_path, limit=1, min_rounds=1)
+        assert "Rounds total/entered  : 1 / 1" in text
+
+    async def test_grid_without_max_rounds_caps_and_warns(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        text = await generate_report(
+            _settings(db_path),
+            db=db_path,
+            with_grid=True,
+            t_entry_values=[20],
+            delta_values=[Decimal("1")],
+            max_price_values=[Decimal("0.99")],
+        )
+        assert "=== SENSITIVITY GRID" in text
+        assert "tanpa --max-rounds" in capsys.readouterr().err
+
 
 class TestFilterRounds:
     def _round(self, end: datetime) -> Round:

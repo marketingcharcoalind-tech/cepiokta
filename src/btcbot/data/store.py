@@ -323,19 +323,44 @@ class Store:
             resolved_outcome=_opt_outcome(row["resolved_outcome"]),
         )
 
-    async def get_resolved_rounds(self, *, limit: int | None = None) -> list[Round]:
-        """Ronde yang sudah resolved (``status='resolved'`` & outcome ada), terurut.
+    async def get_resolved_rounds(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Round]:
+        """Ronde yang sudah resolved (``status='resolved'`` & outcome ada).
 
         Dipakai backtest/replay (Fase 1) sebagai sumber ronde berlabel Gamma.
+        Filter **di SQL** (pushdown, bukan di Python) agar hemat RAM:
+        ``window_end >= since`` / ``window_end <= until`` (inklusif, sama dengan
+        semantik lama ``filter_rounds``). ``limit`` mengambil **N terbaru**
+        (``ORDER BY round_no DESC LIMIT N``) lalu dikembalikan **urut naik**
+        (round_no ASC) agar urutan compounding equity tetap benar/identik.
+
+        Catatan: ``window_end`` disimpan ISO-8601 UTC (lihat :func:`_dt_to_db`);
+        perbandingan leksikografis == kronologis (konsisten dgn
+        :meth:`get_unresolved_rounds`).
         """
-        sql = (
-            "SELECT * FROM rounds WHERE status = 'resolved' "
-            "AND resolved_outcome IS NOT NULL ORDER BY round_no"
-        )
-        params: tuple[object, ...] = ()
+        clauses = ["status = 'resolved'", "resolved_outcome IS NOT NULL"]
+        params: list[object] = []
+        if since is not None:
+            clauses.append("window_end >= ?")
+            params.append(_dt_to_db(since))
+        if until is not None:
+            clauses.append("window_end <= ?")
+            params.append(_dt_to_db(until))
+        where_sql = " AND ".join(clauses)
         if limit is not None:
-            sql += " LIMIT ?"
-            params = (limit,)
+            # N terbaru (DESC LIMIT) lalu urut naik untuk pemrosesan kronologis.
+            sql = (
+                f"SELECT * FROM (SELECT * FROM rounds WHERE {where_sql} "
+                "ORDER BY round_no DESC LIMIT ?) ORDER BY round_no"
+            )
+            params.append(limit)
+        else:
+            sql = f"SELECT * FROM rounds WHERE {where_sql} ORDER BY round_no"
         async with self._conn.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [self._row_to_round(row) for row in rows]
