@@ -89,6 +89,14 @@ class BacktestReport:
     max_drawdown_pct: Decimal
     net_edge_dist: Distribution
     reliability: tuple[ReliabilityBucket, ...]
+    # --- fill-failure (Task A; default 0 = kompatibel mundur) ---
+    rounds_filled: int = 0
+    rounds_signal_no_fill: int = 0
+    rounds_no_signal: int = 0
+    enter_orders_yielded: int = 0
+    fills_total: int = 0
+    fok_rejected_empty_book: int = 0
+    signal_no_fill_rate: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +251,13 @@ def build_report(summary: ReplaySummary, starting_balance: Decimal) -> BacktestR
         max_drawdown_pct=dd_pct,
         net_edge_dist=compute_distribution(net_edges),
         reliability=compute_reliability(summary.diagnostics),
+        rounds_filled=summary.rounds_filled,
+        rounds_signal_no_fill=summary.rounds_signal_no_fill,
+        rounds_no_signal=summary.rounds_no_signal,
+        enter_orders_yielded=summary.enter_orders_yielded,
+        fills_total=summary.fills_total,
+        fok_rejected_empty_book=summary.fok_rejected_empty_book,
+        signal_no_fill_rate=summary.signal_no_fill_rate,
     )
 
 
@@ -344,6 +359,15 @@ def format_report(report: BacktestReport) -> str:
         f"{_fmt(report.pnl_stdev, '0.0001')}",
         f"Max drawdown          : {_fmt(report.max_drawdown, '0.01')} "
         f"({_fmt(report.max_drawdown_pct, '0.01')}%)",
+        "",
+        "fill-failure (Task A — NO_SIGNAL vs SIGNAL_NO_FILL):",
+        f"  rounds filled / signal_no_fill / no_signal : "
+        f"{report.rounds_filled} / {report.rounds_signal_no_fill} / {report.rounds_no_signal}",
+        f"  enter_orders_yielded / fills_total         : "
+        f"{report.enter_orders_yielded} / {report.fills_total}",
+        f"  fok_rejected_empty_book                    : {report.fok_rejected_empty_book}",
+        f"  signal_no_fill_rate                        : "
+        f"{_fmt(report.signal_no_fill_rate * 100, '0.1')}%",
         "",
         "net_edge @ entry (distribusi):",
         f"  n={report.net_edge_dist.count} min={_fmt(report.net_edge_dist.minimum)} "

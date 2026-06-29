@@ -208,6 +208,22 @@ class RoundDiagnostics:
     pnl: Decimal
 
 
+# Klasifikasi gagal-fill (Task A — observability murni, bukan keputusan trading).
+ROUND_FILLED = "FILLED"  # >= 1 entry fill
+ROUND_SIGNAL_NO_FILL = "SIGNAL_NO_FILL"  # >= 1 EnterOrder tapi 0 fill (likuiditas ekor)
+ROUND_NO_SIGNAL = "NO_SIGNAL"  # 0 EnterOrder (edge memang tak ada/tipis)
+
+
+@dataclass(frozen=True, slots=True)
+class RoundObservation:
+    """Observasi gagal-fill per ronde (Task A). TIDAK mempengaruhi PnL/keputusan."""
+
+    classification: str  # ROUND_FILLED | ROUND_SIGNAL_NO_FILL | ROUND_NO_SIGNAL
+    enter_orders_yielded: int
+    fills: int  # entry fill sukses
+    fok_rejected_empty_book: int
+
+
 @dataclass(frozen=True, slots=True)
 class ReplaySummary:
     """Ringkasan hasil replay seluruh ronde (input metrik docs/09 §9.4)."""
@@ -220,9 +236,57 @@ class ReplaySummary:
     final_balance: Decimal
     results: tuple[RoundResult, ...]
     diagnostics: tuple[RoundDiagnostics, ...] = ()
+    # --- fill-failure observability (Task A; default 0 = kompatibel mundur) ---
+    rounds_filled: int = 0
+    rounds_signal_no_fill: int = 0
+    rounds_no_signal: int = 0
+    enter_orders_yielded: int = 0
+    fills_total: int = 0
+    fok_rejected_empty_book: int = 0
+
+    @property
+    def signal_no_fill_rate(self) -> Decimal:
+        """Fraksi ronde ber-sinyal yang GAGAL fill (likuiditas ekor terukur)."""
+        denom = self.rounds_filled + self.rounds_signal_no_fill
+        return Decimal(self.rounds_signal_no_fill) / Decimal(denom) if denom else _ZERO
 
 
 # ----- engine -----
+
+
+class _ObsTally:
+    """Akumulator inkremental observasi gagal-fill (Task A; memori ~konstan)."""
+
+    def __init__(self) -> None:
+        self.rounds_filled = 0
+        self.rounds_signal_no_fill = 0
+        self.rounds_no_signal = 0
+        self.enter_orders_yielded = 0
+        self.fills_total = 0
+        self.fok_rejected_empty_book = 0
+
+    def add(self, obs: RoundObservation) -> None:
+        """Roll-up satu observasi ronde."""
+        if obs.classification == ROUND_FILLED:
+            self.rounds_filled += 1
+        elif obs.classification == ROUND_SIGNAL_NO_FILL:
+            self.rounds_signal_no_fill += 1
+        else:
+            self.rounds_no_signal += 1
+        self.enter_orders_yielded += obs.enter_orders_yielded
+        self.fills_total += obs.fills
+        self.fok_rejected_empty_book += obs.fok_rejected_empty_book
+
+    def as_kwargs(self) -> dict[str, int]:
+        """Field observability untuk konstruksi :class:`ReplaySummary`."""
+        return {
+            "rounds_filled": self.rounds_filled,
+            "rounds_signal_no_fill": self.rounds_signal_no_fill,
+            "rounds_no_signal": self.rounds_no_signal,
+            "enter_orders_yielded": self.enter_orders_yielded,
+            "fills_total": self.fills_total,
+            "fok_rejected_empty_book": self.fok_rejected_empty_book,
+        }
 
 
 class _RoundLedger:
@@ -239,6 +303,10 @@ class _RoundLedger:
         self.entry_p_win: Decimal = _ZERO
         self.entry_net_edge: Decimal = _ZERO
         self.fills: list[Fill] = []
+        # --- observability gagal-fill (Task A; tak mempengaruhi PnL) ---
+        self.enter_orders_yielded: int = 0
+        self.entry_fills: int = 0
+        self.fok_rejected_empty_book: int = 0
 
     @property
     def entered(self) -> bool:
@@ -282,9 +350,33 @@ class ReplayEngine:
         *,
         bankroll: Decimal,
     ) -> tuple[RoundResult, RoundDiagnostics] | None:
-        """Inti simulasi satu ronde → (RoundResult, RoundDiagnostics) atau None."""
-        if rnd.resolved_outcome is None or not ticks:
+        """Inti simulasi satu ronde → (RoundResult, RoundDiagnostics) atau None.
+
+        Pembungkus tipis :meth:`observe` (kompat lama). Lihat :meth:`observe`
+        untuk metrik gagal-fill (Task A).
+        """
+        result, diag, _obs = self.observe(rnd, ticks, bankroll=bankroll)
+        if result is None or diag is None:
             return None
+        return result, diag
+
+    def observe(
+        self,
+        rnd: Round,
+        ticks: Sequence[ReplayTick],
+        *,
+        bankroll: Decimal,
+    ) -> tuple[RoundResult | None, RoundDiagnostics | None, RoundObservation]:
+        """Simulasi satu ronde + observasi gagal-fill (Task A).
+
+        Mengembalikan ``(RoundResult|None, RoundDiagnostics|None, RoundObservation)``.
+        ``RoundResult``/``RoundDiagnostics`` ``None`` bila tidak ada entry (sama
+        seperti perilaku lama); :class:`RoundObservation` SELALU diisi & mengklasifikasi
+        ronde: FILLED / SIGNAL_NO_FILL / NO_SIGNAL (observability murni, tak mengubah
+        angka PnL/keputusan).
+        """
+        if rnd.resolved_outcome is None or not ticks:
+            return None, None, RoundObservation(ROUND_NO_SIGNAL, 0, 0, 0)
 
         clock = SimClock(ticks[0].ts)
         ledger = _RoundLedger()
@@ -308,6 +400,7 @@ class ReplayEngine:
 
             for decision in self._strategy.on_tick(signal, mbook, position):
                 if isinstance(decision, EnterOrder):
+                    ledger.enter_orders_yielded += 1  # R-A1: sinyal terbentuk
                     self._exec_entry(
                         decision, signal, rnd, mbook, exec_tick, ledger, limits, bankroll
                     )
@@ -320,8 +413,9 @@ class ReplayEngine:
             if closed_early:
                 break
 
+        obs = self._classify(ledger)
         if not ledger.entered:
-            return None
+            return None, None, obs
         result = self._settle(rnd, ledger, bankroll)
         won = ledger.entry_outcome == (
             rnd.resolved_outcome.value if rnd.resolved_outcome is not None else ""
@@ -333,7 +427,23 @@ class ReplayEngine:
             won=won,
             pnl=result.pnl,
         )
-        return result, diag
+        return result, diag, obs
+
+    @staticmethod
+    def _classify(ledger: _RoundLedger) -> RoundObservation:
+        """Klasifikasikan ronde (R-A3) dari flag lokal ledger."""
+        if ledger.entered:
+            classification = ROUND_FILLED
+        elif ledger.enter_orders_yielded > 0:
+            classification = ROUND_SIGNAL_NO_FILL
+        else:
+            classification = ROUND_NO_SIGNAL
+        return RoundObservation(
+            classification=classification,
+            enter_orders_yielded=ledger.enter_orders_yielded,
+            fills=ledger.entry_fills,
+            fok_rejected_empty_book=ledger.fok_rejected_empty_book,
+        )
 
     def run(
         self,
@@ -344,11 +454,12 @@ class ReplayEngine:
         results: list[RoundResult] = []
         diagnostics: list[RoundDiagnostics] = []
         wins = losses = entered = 0
+        obs_tally = _ObsTally()
         for rnd, ticks in rounds:
-            detailed = self.simulate(rnd, ticks, bankroll=balance)
-            if detailed is None:
+            res, diag, obs = self.observe(rnd, ticks, bankroll=balance)
+            obs_tally.add(obs)
+            if res is None or diag is None:
                 continue
-            res, diag = detailed
             entered += 1
             balance = res.balance_after
             results.append(res)
@@ -366,6 +477,7 @@ class ReplayEngine:
             final_balance=balance,
             results=tuple(results),
             diagnostics=tuple(diagnostics),
+            **obs_tally.as_kwargs(),
         )
 
     # ----- helpers -----
@@ -429,7 +541,13 @@ class ReplayEngine:
             ignore_depth=not self._cfg.slippage_enabled,
         )
         if not fr.filled:
+            # R-A2: FOK gagal karena ASK sisi pemimpin kosong/tak cukup di exec_tick.
+            # "Book pemimpin kosong" = depth ASK exec <= 0 (definisi sama dgn fill 0).
+            exec_ask_depth = sum((lvl.size for lvl in exec_book.asks), _ZERO)
+            if exec_ask_depth <= _ZERO:
+                ledger.fok_rejected_empty_book += 1
             return
+        ledger.entry_fills += 1  # R-A4: fills_total (entry sukses)
         fee = self._fee(fr.avg_price, fr.filled_size)
         ledger.cash -= fr.notional + fee
         ledger.holdings[decision.token_id] = (
@@ -653,14 +771,15 @@ class RunAccumulator:
         self._losses = 0
         self._entered = 0
         self._total = 0
+        self._obs = _ObsTally()
 
     def feed(self, rnd: Round, ticks: Sequence[ReplayTick]) -> RoundResult | None:
         """Proses satu ronde; akumulasi statistik. Kembalikan RoundResult bila entry."""
         self._total += 1
-        detailed = self._engine.simulate(rnd, ticks, bankroll=self._balance)
-        if detailed is None:
+        res, diag, obs = self._engine.observe(rnd, ticks, bankroll=self._balance)
+        self._obs.add(obs)
+        if res is None or diag is None:
             return None
-        res, diag = detailed
         self._entered += 1
         self._balance = res.balance_after
         self._results.append(res)
@@ -682,6 +801,7 @@ class RunAccumulator:
             final_balance=self._balance,
             results=tuple(self._results),
             diagnostics=tuple(self._diags),
+            **self._obs.as_kwargs(),
         )
 
 
