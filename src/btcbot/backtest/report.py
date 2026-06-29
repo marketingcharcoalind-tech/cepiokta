@@ -12,12 +12,22 @@ opsional (matplotlib) bila terpasang; default output tabel teks.
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import math
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
-from btcbot.backtest.replay import ReplayConfig, ReplayEngine, ReplaySummary
+from btcbot.backtest.replay import (
+    ReplayConfig,
+    ReplayEngine,
+    ReplaySummary,
+    load_round_replays,
+)
+from btcbot.config.settings import Settings, get_settings
+from btcbot.data.store import Store
 from btcbot.domain.fees import ZeroFee
 
 if TYPE_CHECKING:
@@ -377,3 +387,192 @@ def format_ablation(rows: Sequence[AblationRow]) -> str:
             f"{_fmt(r.roi * 100, '0.01'):>6}  {_fmt(r.win_rate * 100, '0.1'):>6}"
         )
     return "\n".join(lines)
+
+
+# ----- CLI entry-point (python -m btcbot.backtest.report) -----
+
+# Default grid (dapat dioverride via flag).
+_DEFAULT_T_ENTRY = (60, 45, 30, 15)
+_DEFAULT_DELTA_GRID = (Decimal("0.02"), Decimal("0.05"), Decimal("0.10"))
+_DEFAULT_MAX_PRICE = (Decimal("0.90"), Decimal("0.95"), Decimal("0.98"))
+_DEFAULT_MIN_ROUNDS = 300
+
+
+def _parse_iso(value: str) -> datetime:
+    """Parse ISO-8601 (termasuk sufiks ``Z``) → datetime tz-aware UTC."""
+    normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    dt = datetime.fromisoformat(normalized)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _resolve_delta(settings: Settings, override: str | None) -> Decimal:
+    """Resolusi delta_threshold ke Decimal ('auto' → 0 = tanpa filter Δ)."""
+    raw = override if override is not None else settings.delta_threshold
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return _ZERO
+
+
+def filter_rounds(
+    rounds: Sequence[tuple[Round, Sequence[ReplayTick]]],
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[tuple[Round, Sequence[ReplayTick]]]:
+    """Filter ronde berdasarkan ``window_end`` dalam rentang ``[since, until]``."""
+    out: list[tuple[Round, Sequence[ReplayTick]]] = []
+    for rnd, ticks in rounds:
+        we = rnd.window_end
+        if since is not None and we < since:
+            continue
+        if until is not None and we > until:
+            continue
+        out.append((rnd, ticks))
+    return out
+
+
+def format_g1_preview(report: BacktestReport, min_rounds: int) -> str:
+    """Blok ringkas G1 — ALAT UKUR, bukan verdict final (keputusan = manusia)."""
+    sign = "POSITIF" if report.net_pnl > _ZERO else ("NEGATIF" if report.net_pnl < _ZERO else "NOL")
+    enough = report.rounds_entered >= min_rounds
+    data_note = (
+        f"CUKUP (>= {min_rounds})"
+        if enough
+        else f"BELUM CUKUP (< {min_rounds}) — kumpulkan lebih banyak data"
+    )
+    return "\n".join(
+        [
+            "=== G1 PREVIEW ===",
+            f"Net PnL setelah fee : {_fmt(report.net_pnl, '0.01')} ({sign})",
+            f"ROI                 : {_fmt(report.roi * 100, '0.01')}%",
+            f"Win-rate            : {_fmt(report.win_rate * 100, '0.1')}%",
+            f"Ronde berlabel      : {report.rounds_entered} (total {report.rounds_total})",
+            f"Ambang data         : {data_note}",
+            "Catatan: ini ALAT UKUR. Keputusan LANJUT/REVISI/STOP tetap di tangan manusia.",
+        ]
+    )
+
+
+async def generate_report(  # noqa: PLR0913 - flag CLI eksplisit
+    settings: Settings,
+    *,
+    db: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    starting_balance: Decimal | None = None,
+    delta: str | None = None,
+    with_ablation: bool = False,
+    with_grid: bool = False,
+    t_entry_values: Sequence[int] = _DEFAULT_T_ENTRY,
+    delta_values: Sequence[Decimal] = _DEFAULT_DELTA_GRID,
+    max_price_values: Sequence[Decimal] = _DEFAULT_MAX_PRICE,
+    min_rounds: int = _DEFAULT_MIN_ROUNDS,
+) -> str:
+    """Muat ronde resolved + tick, jalankan replay, rakit teks laporan + G1 preview."""
+    db_url = db or settings.db_url
+    store = await Store.open(db_url)
+    try:
+        loaded = await load_round_replays(store)
+    finally:
+        await store.close()
+
+    rounds = filter_rounds(loaded, since=since, until=until)
+    if not rounds:
+        return (
+            "Tidak ada ronde berlabel (status='resolved') di DB untuk rentang ini.\n"
+            "Rekam data (readonly) lalu `--resolve-backfill`, baru jalankan laporan ini."
+        )
+
+    base = ReplayConfig.from_settings(settings, delta_threshold=_resolve_delta(settings, delta))
+    sb = starting_balance if starting_balance is not None else settings.paper_starting_balance
+    base = replace(base, starting_balance=sb)
+
+    summary = ReplayEngine(base).run(rounds)
+    report = build_report(summary, base.starting_balance)
+    sections = [format_report(report)]
+    if with_ablation:
+        sections.append(format_ablation(ablation(rounds, base)))
+    if with_grid:
+        cells = sensitivity_grid(
+            rounds,
+            base,
+            t_entry_values=t_entry_values,
+            delta_values=delta_values,
+            max_price_values=max_price_values,
+        )
+        sections.append(format_grid(cells))
+    sections.append(format_g1_preview(report, min_rounds))
+    return "\n\n".join(sections)
+
+
+def _int_list(value: str) -> list[int]:
+    return [int(x) for x in value.split(",") if x.strip()]
+
+
+def _dec_list(value: str) -> list[Decimal]:
+    return [Decimal(x) for x in value.split(",") if x.strip()]
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="btcbot-report",
+        description="Laporan metrik backtest (G1) dari data terekam.",
+    )
+    p.add_argument("--db", default=None, help="path/URL DB (default: Settings.db_url)")
+    p.add_argument("--days", type=int, default=None, help="hanya ronde N hari terakhir")
+    p.add_argument("--since", default=None, help="filter window_end >= ISO-8601")
+    p.add_argument("--until", default=None, help="filter window_end <= ISO-8601")
+    p.add_argument("--starting-balance", default=None, help="saldo awal (default: paper)")
+    p.add_argument("--delta", default=None, help="delta_threshold baseline ('auto'→0)")
+    p.add_argument("--ablation", action="store_true", help="cetak tabel ablation")
+    p.add_argument("--grid", action="store_true", help="cetak sensitivity grid")
+    p.add_argument("--t-entry", default=None, help="grid T_ENTRY_SEC (mis. 60,45,30,15)")
+    p.add_argument("--delta-grid", default=None, help="grid DELTA_THRESHOLD (mis. 0.02,0.05,0.10)")
+    p.add_argument("--max-price", default=None, help="grid MAX_PRICE (mis. 0.90,0.95,0.98)")
+    p.add_argument(
+        "--min-rounds",
+        type=int,
+        default=_DEFAULT_MIN_ROUNDS,
+        help=f"ambang data G1 (default {_DEFAULT_MIN_ROUNDS})",
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry-point: ``python -m btcbot.backtest.report [flags]``."""
+    args = _build_parser().parse_args(argv)
+    settings = get_settings()
+
+    since = _parse_iso(args.since) if args.since else None
+    until = _parse_iso(args.until) if args.until else None
+    if args.days is not None:
+        day_cutoff = datetime.now(UTC) - timedelta(days=args.days)
+        since = max(since, day_cutoff) if since is not None else day_cutoff
+
+    text = asyncio.run(
+        generate_report(
+            settings,
+            db=args.db,
+            since=since,
+            until=until,
+            starting_balance=(
+                Decimal(args.starting_balance) if args.starting_balance is not None else None
+            ),
+            delta=args.delta,
+            with_ablation=args.ablation,
+            with_grid=args.grid,
+            t_entry_values=_int_list(args.t_entry) if args.t_entry else _DEFAULT_T_ENTRY,
+            delta_values=_dec_list(args.delta_grid) if args.delta_grid else _DEFAULT_DELTA_GRID,
+            max_price_values=_dec_list(args.max_price) if args.max_price else _DEFAULT_MAX_PRICE,
+            min_rounds=args.min_rounds,
+        )
+    )
+    print(text)  # noqa: T201 - output laporan ke stdout
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
