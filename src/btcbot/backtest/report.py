@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from btcbot.backtest.replay import (
     ENTRY_REASON_KEYS,
+    FILL_FAIL_KEYS,
     ReplayConfig,
     ReplayEngine,
     ReplaySummary,
@@ -100,6 +101,8 @@ class BacktestReport:
     signal_no_fill_rate: Decimal = Decimal("0")
     # Entry diagnostics (Task G2): hitungan alasan Strategy NoOp jalur entry + ENTER.
     entry_reason_counts: dict[str, int] = field(default_factory=dict)
+    # Fill-failure diagnostics (Task G3): klasifikasi sebab NO_FILL.
+    fill_failure_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +265,7 @@ def build_report(summary: ReplaySummary, starting_balance: Decimal) -> BacktestR
         fok_rejected_empty_book=summary.fok_rejected_empty_book,
         signal_no_fill_rate=summary.signal_no_fill_rate,
         entry_reason_counts=dict(summary.entry_reason_counts),
+        fill_failure_counts=dict(summary.fill_failure_counts),
     )
 
 
@@ -393,6 +397,12 @@ def format_report(report: BacktestReport) -> str:
     for key in ENTRY_REASON_KEYS:
         count = report.entry_reason_counts.get(key, 0)
         lines.append(f"  {key:<{width}} : {count}")
+    lines.append("")
+    lines.append("=== FILL FAILURE DIAGNOSTICS ===")
+    ff_width = max(len(k) for k in FILL_FAIL_KEYS)
+    for key in FILL_FAIL_KEYS:
+        count = report.fill_failure_counts.get(key, 0)
+        lines.append(f"  {key:<{ff_width}} : {count}")
     return "\n".join(lines)
 
 

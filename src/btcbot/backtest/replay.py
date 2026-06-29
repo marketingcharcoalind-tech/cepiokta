@@ -156,6 +156,74 @@ def simulate_fill(  # noqa: PLR0913, PLR0911 - parameter & guard eksplisit
     return FillResult(filled_size=filled, avg_price=cost / filled, notional=cost)
 
 
+# ----- fill-failure classification (Task G3 — observability MURNI, read-only) -----
+
+FILL_FAIL_EMPTY_BOOK = "EMPTY_BOOK"
+FILL_FAIL_BEST_ABOVE_LIMIT = "BEST_PRICE_ABOVE_LIMIT"
+FILL_FAIL_NO_LEVEL_WITHIN_LIMIT = "NO_LEVEL_WITHIN_LIMIT"
+FILL_FAIL_INSUFFICIENT_DEPTH_FOK = "INSUFFICIENT_DEPTH_FOK"
+FILL_FAIL_REQUESTED_SIZE_ZERO = "REQUESTED_SIZE_ZERO"
+FILL_FAIL_UNKNOWN = "UNKNOWN"
+FILL_FAIL_KEYS: tuple[str, ...] = (
+    FILL_FAIL_EMPTY_BOOK,
+    FILL_FAIL_BEST_ABOVE_LIMIT,
+    FILL_FAIL_NO_LEVEL_WITHIN_LIMIT,
+    FILL_FAIL_INSUFFICIENT_DEPTH_FOK,
+    FILL_FAIL_REQUESTED_SIZE_ZERO,
+    FILL_FAIL_UNKNOWN,
+)
+
+
+def _new_fill_failures() -> dict[str, int]:
+    return dict.fromkeys(FILL_FAIL_KEYS, 0)
+
+
+def classify_no_fill(  # noqa: PLR0911, PLR0913 - guard eksplisit per-reason
+    *,
+    book: OrderBook,
+    side: str,
+    limit_price: Decimal,
+    requested_size: Decimal,
+    order_type: str,
+    competition_fraction: Decimal = _ZERO,
+    ignore_depth: bool = False,
+) -> str:
+    """Klasifikasikan SEBAB sebuah taker order tidak terisi (NO_FILL).
+
+    **Read-only & cermin** :func:`simulate_fill` (semantik level-walk identik) —
+    TIDAK mengubah perilaku fill. Dipanggil HANYA saat fill = 0 untuk observability
+    (Task G3). Kembalikan tepat satu dari :data:`FILL_FAIL_KEYS`.
+    """
+    if requested_size <= _ZERO:
+        return FILL_FAIL_REQUESTED_SIZE_ZERO
+    is_buy = side == SIDE_BUY
+    levels = (
+        sorted(book.asks, key=lambda lvl: lvl.price)
+        if is_buy
+        else sorted(book.bids, key=lambda lvl: lvl.price, reverse=True)
+    )
+    if not levels:
+        return FILL_FAIL_EMPTY_BOOK
+    best = levels[0]
+    if (is_buy and best.price > limit_price) or (not is_buy and best.price < limit_price):
+        return FILL_FAIL_BEST_ABOVE_LIMIT
+    if ignore_depth:
+        # best in-range → simulate_fill mengisi penuh; no-fill mustahil di sini.
+        return FILL_FAIL_UNKNOWN
+    factor = _ONE - competition_fraction
+    avail = _ZERO
+    for lvl in levels:
+        in_range = lvl.price <= limit_price if is_buy else lvl.price >= limit_price
+        if not in_range:
+            break
+        avail += lvl.size * factor
+    if avail <= _ZERO:
+        return FILL_FAIL_NO_LEVEL_WITHIN_LIMIT
+    if order_type == "FOK" and avail + _EPS < requested_size:
+        return FILL_FAIL_INSUFFICIENT_DEPTH_FOK
+    return FILL_FAIL_UNKNOWN
+
+
 # ----- replay inputs & config -----
 
 
@@ -247,6 +315,8 @@ class RoundObservation:
     fok_rejected_empty_book: int
     # Entry diagnostics (Task G2): hitungan alasan NoOp jalur entry + ENTER.
     entry_reasons: dict[str, int] = field(default_factory=_new_entry_reasons)
+    # Fill-failure diagnostics (Task G3): klasifikasi sebab NO_FILL per EnterOrder.
+    fill_failures: dict[str, int] = field(default_factory=_new_fill_failures)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +340,8 @@ class ReplaySummary:
     fok_rejected_empty_book: int = 0
     # Entry diagnostics (Task G2): hitungan alasan NoOp jalur entry + ENTER.
     entry_reason_counts: dict[str, int] = field(default_factory=_new_entry_reasons)
+    # Fill-failure diagnostics (Task G3): klasifikasi sebab NO_FILL per EnterOrder.
+    fill_failure_counts: dict[str, int] = field(default_factory=_new_fill_failures)
 
     @property
     def signal_no_fill_rate(self) -> Decimal:
@@ -292,6 +364,7 @@ class _ObsTally:
         self.fills_total = 0
         self.fok_rejected_empty_book = 0
         self.entry_reasons: dict[str, int] = _new_entry_reasons()
+        self.fill_failures: dict[str, int] = _new_fill_failures()
 
     def add(self, obs: RoundObservation) -> None:
         """Roll-up satu observasi ronde."""
@@ -306,6 +379,8 @@ class _ObsTally:
         self.fok_rejected_empty_book += obs.fok_rejected_empty_book
         for key, count in obs.entry_reasons.items():
             self.entry_reasons[key] = self.entry_reasons.get(key, 0) + count
+        for key, count in obs.fill_failures.items():
+            self.fill_failures[key] = self.fill_failures.get(key, 0) + count
 
     def as_kwargs(self) -> dict[str, int]:
         """Field observability int untuk konstruksi :class:`ReplaySummary`."""
@@ -321,6 +396,10 @@ class _ObsTally:
     def entry_counts(self) -> dict[str, int]:
         """Hitungan alasan entry (Task G2) sebagai dict baru (stabil)."""
         return dict(self.entry_reasons)
+
+    def fill_failure_counts(self) -> dict[str, int]:
+        """Hitungan sebab gagal-fill (Task G3) sebagai dict baru (stabil)."""
+        return dict(self.fill_failures)
 
 
 class _RoundLedger:
@@ -341,6 +420,8 @@ class _RoundLedger:
         self.enter_orders_yielded: int = 0
         self.entry_fills: int = 0
         self.fok_rejected_empty_book: int = 0
+        # --- klasifikasi sebab gagal-fill (Task G3; observability murni) ---
+        self.fill_failures: dict[str, int] = _new_fill_failures()
 
     @property
     def entered(self) -> bool:
@@ -482,6 +563,7 @@ class ReplayEngine:
             fills=ledger.entry_fills,
             fok_rejected_empty_book=ledger.fok_rejected_empty_book,
             entry_reasons=entry_reasons,
+            fill_failures=ledger.fill_failures,
         )
 
     def run(
@@ -517,6 +599,7 @@ class ReplayEngine:
             results=tuple(results),
             diagnostics=tuple(diagnostics),
             entry_reason_counts=obs_tally.entry_counts(),
+            fill_failure_counts=obs_tally.fill_failure_counts(),
             **obs_tally.as_kwargs(),
         )
 
@@ -569,6 +652,7 @@ class ReplayEngine:
         depth = sum((lvl.size for lvl in decision_book.asks), _ZERO)
         sized = size(signal, bankroll, depth, limits)
         if sized <= _ZERO:
+            ledger.fill_failures[FILL_FAIL_REQUESTED_SIZE_ZERO] += 1  # G3
             return
         exec_book = exec_tick.book_up if leader is Outcome.UP else exec_tick.book_down
         fr = simulate_fill(
@@ -581,6 +665,17 @@ class ReplayEngine:
             ignore_depth=not self._cfg.slippage_enabled,
         )
         if not fr.filled:
+            # G3: klasifikasikan sebab gagal-fill (read-only, cermin simulate_fill).
+            reason = classify_no_fill(
+                book=exec_book,
+                side=SIDE_BUY,
+                limit_price=decision.price,
+                requested_size=sized,
+                order_type=decision.order_type,
+                competition_fraction=self._cfg.competition_fraction,
+                ignore_depth=not self._cfg.slippage_enabled,
+            )
+            ledger.fill_failures[reason] += 1
             # R-A2: FOK gagal karena ASK sisi pemimpin kosong/tak cukup di exec_tick.
             # "Book pemimpin kosong" = depth ASK exec <= 0 (definisi sama dgn fill 0).
             exec_ask_depth = sum((lvl.size for lvl in exec_book.asks), _ZERO)
@@ -842,6 +937,7 @@ class RunAccumulator:
             results=tuple(self._results),
             diagnostics=tuple(self._diags),
             entry_reason_counts=self._obs.entry_counts(),
+            fill_failure_counts=self._obs.fill_failure_counts(),
             **self._obs.as_kwargs(),
         )
 
