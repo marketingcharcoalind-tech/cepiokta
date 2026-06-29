@@ -72,6 +72,19 @@ AGGREGATOR_V3_ABI: tuple[dict[str, object], ...] = (
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [{"internalType": "uint80", "name": "_roundId", "type": "uint80"}],
+        "name": "getRoundData",
+        "outputs": [
+            {"internalType": "uint80", "name": "roundId", "type": "uint80"},
+            {"internalType": "int256", "name": "answer", "type": "int256"},
+            {"internalType": "uint256", "name": "startedAt", "type": "uint256"},
+            {"internalType": "uint256", "name": "updatedAt", "type": "uint256"},
+            {"internalType": "uint80", "name": "answeredInRound", "type": "uint80"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
 )
 
 
@@ -392,3 +405,122 @@ class FakePriceSource:
             round_id=self._round_id,
             stale=self._stale,
         )
+
+
+class ChainlinkHistory:
+    """Pembaca **historis** Data Feeds (``getRoundData`` walk) untuk backfill (Bug B9).
+
+    Menelusuri ``roundId`` mundur dari ronde terbaru, mengumpulkan harga yang
+    ``updatedAt``-nya jatuh di jendela ``[start, end]`` (granularitas ~heartbeat
+    feed, mis. ~27s). Best-effort: berhenti saat keluar jendela, ``max_walk``
+    tercapai, atau ronde tak terbaca (revert lintas-phase). READ-ONLY (eth_call).
+
+    Args:
+        rpc_url: URL RPC Polygon.
+        address: Alamat feed (Settings.chainlink_btcusd_source).
+        timeout_sec: Timeout HTTP per request.
+        user_agent: UA browser (beberapa RPC publik 403 tanpa UA).
+        source: Label sumber untuk :class:`PriceTick`.
+        min_price/max_price: Sanity range (USD).
+        max_walk: Batas langkah mundur (jaring pengaman).
+    """
+
+    def __init__(  # noqa: PLR0913 - konfigurasi eksplisit
+        self,
+        rpc_url: str,
+        address: str,
+        *,
+        timeout_sec: float = 10.0,
+        user_agent: str = BROWSER_USER_AGENT,
+        source: str = "chainlink:data_feed:history",
+        min_price: Decimal = _DEFAULT_MIN_PRICE,
+        max_price: Decimal = _DEFAULT_MAX_PRICE,
+        max_walk: int = 5000,
+    ) -> None:
+        if not rpc_url:
+            raise ValueError("POLYGON_RPC_URL belum dikonfigurasi")
+        if not address:
+            raise ValueError("CHAINLINK_BTCUSD_SOURCE belum dikonfigurasi")
+        self._rpc_url = rpc_url
+        self._address = address
+        self._timeout_sec = timeout_sec
+        self._user_agent = user_agent
+        self._source = source
+        self._min_price = min_price
+        self._max_price = max_price
+        self._max_walk = max_walk
+        self._contract: Any = None
+        self._decimals: int | None = None
+
+    def _get_contract(self) -> Any:  # noqa: ANN401 - web3 contract dinamis
+        if self._contract is None:
+            provider = AsyncWeb3.AsyncHTTPProvider(
+                self._rpc_url,
+                request_kwargs={
+                    "headers": {"User-Agent": self._user_agent},
+                    "timeout": self._timeout_sec,
+                },
+            )
+            w3 = AsyncWeb3(provider)
+            checksum = w3.to_checksum_address(self._address)
+            self._contract = w3.eth.contract(address=checksum, abi=list(AGGREGATOR_V3_ABI))
+        return self._contract
+
+    async def _round_data(self, round_id: int | None) -> AggregatorRoundData:
+        contract = self._get_contract()
+        if round_id is None:
+            result = await contract.functions.latestRoundData().call()
+        else:
+            result = await contract.functions.getRoundData(round_id).call()
+        rid, answer, started_at, updated_at, answered_in_round = result
+        return AggregatorRoundData(
+            round_id=int(rid),
+            answer=int(answer),
+            started_at=int(started_at),
+            updated_at=int(updated_at),
+            answered_in_round=int(answered_in_round),
+        )
+
+    async def _to_tick(self, data: AggregatorRoundData, decimals: int) -> PriceTick | None:
+        if data.answer <= 0:
+            return None
+        price = Decimal(data.answer) / (Decimal(10) ** decimals)
+        if not (self._min_price < price < self._max_price):
+            return None
+        return PriceTick(
+            price=price,
+            ts=datetime.fromtimestamp(data.updated_at, tz=UTC),
+            source=self._source,
+            round_id=data.round_id,
+            stale=False,
+        )
+
+    async def iter_window(self, start: datetime, end: datetime) -> Any:  # noqa: ANN401
+        """Yield :class:`PriceTick` dengan ``updatedAt`` di ``[start, end]`` (kronologis)."""
+        start_epoch = int(start.timestamp())
+        end_epoch = int(end.timestamp())
+        if self._decimals is None:
+            contract = self._get_contract()
+            self._decimals = int(await contract.functions.decimals().call())
+        decimals = self._decimals
+
+        latest = await self._round_data(None)
+        collected: list[PriceTick] = []
+        rid = latest.round_id
+        for _ in range(self._max_walk):
+            try:
+                data = await self._round_data(rid)
+            except Exception:
+                break
+            if data.updated_at < start_epoch:
+                break  # sudah sebelum jendela → selesai (lebih tua lagi tak relevan)
+            if data.updated_at <= end_epoch:
+                tick = await self._to_tick(data, decimals)
+                if tick is not None:
+                    collected.append(tick)
+            rid -= 1
+            if rid <= 0:
+                break
+
+        for tick in reversed(collected):  # kronologis (lama → baru)
+            yield tick

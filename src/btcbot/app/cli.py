@@ -27,6 +27,7 @@ from btcbot.adapters.clock import SystemClock
 from btcbot.adapters.gamma import TRANSIENT_UPSTREAM_ERRORS, HttpGammaClient
 from btcbot.app.demo import build_demo_runtime
 from btcbot.app.discovery import discover_with_retry, run_supervised
+from btcbot.app.price_sampler import PriceSampler
 from btcbot.config.settings import Settings, get_settings
 from btcbot.data.recorder import Recorder
 from btcbot.data.resolver import Resolver
@@ -79,6 +80,7 @@ async def run_readonly(  # noqa: PLR0913
     gamma: GammaClient,
     recorder: Recorder,
     resolver: Resolver | None = None,
+    price_sampler: PriceSampler | None = None,
     max_rounds: int | None = None,
     updates_per_round: int | None = None,
     shutdown: asyncio.Event | None = None,
@@ -89,6 +91,8 @@ async def run_readonly(  # noqa: PLR0913
     Tidak mengirim order. Berhenti bila ``max_rounds`` tercapai atau
     ``shutdown`` di-set (mis. SIGINT). Bila ``resolver`` diberikan, ronde lama
     yang due dilabeli outcome-nya tiap ``resolve_poll_seconds`` (sumber Gamma).
+    Bila ``price_sampler`` diberikan, trajektori harga BTC direkam PARALEL dengan
+    book recording (Bug B9).
     """
     log = logger or structlog.get_logger()
     balance = settings.paper_starting_balance  # saldo simulasi tetap (readonly)
@@ -124,12 +128,26 @@ async def run_readonly(  # noqa: PLR0913
         if tick2.stale:
             log.warning("price_stale", round_no=round_no, ts=tick2.ts.isoformat())
 
-        await recorder.consume_market(
-            round_no,
-            [meta.token_id_up, meta.token_id_down],
-            window_end=meta.end_time,
-            limit=updates_per_round,
-        )
+        # Book streaming + price sampler (Bug B9) berjalan PARALEL: harga BTC
+        # direkam selama window agar backtest punya delta yang bergerak.
+        price_samples = 0
+        if price_sampler is not None:
+            _book, price_samples = await asyncio.gather(
+                recorder.consume_market(
+                    round_no,
+                    [meta.token_id_up, meta.token_id_down],
+                    window_end=meta.end_time,
+                    limit=updates_per_round,
+                ),
+                price_sampler.run(rnd, shutdown=shutdown),
+            )
+        else:
+            await recorder.consume_market(
+                round_no,
+                [meta.token_id_up, meta.token_id_down],
+                window_end=meta.end_time,
+                limit=updates_per_round,
+            )
 
         # Resolusi: resolver (ground truth Gamma untuk ronde lama yang due) ATAU
         # fallback inline (mode demo) untuk ronde yang sudah resolved seketika.
@@ -163,13 +181,16 @@ async def run_readonly(  # noqa: PLR0913
             balance=str(balance),
             mode=str(settings.mode),
             resolved=resolved_str,
+            price_samples=price_samples,
         )
 
     return processed
 
 
-async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorder, Resolver]:
-    """Bangun store + adapter nyata + recorder + resolver (readonly, tanpa order).
+async def build_runtime(
+    settings: Settings,
+) -> tuple[Store, GammaClient, Recorder, Resolver, PriceSampler]:
+    """Bangun store + adapter nyata + recorder + resolver + sampler (readonly).
 
     Catatan: ``ChainlinkDataFeed`` membaca on-chain via RPC. Bila harga gagal
     dibaca/anomali, ``record_price_tick`` melempar ``PriceUnavailableError``
@@ -207,13 +228,24 @@ async def build_runtime(settings: Settings) -> tuple[Store, GammaClient, Recorde
     )
     ws.set_event_sink(recorder.on_circuit_event)
     resolver = Resolver(store, gamma, clock, price_source=price_source)
-    return store, gamma, recorder, resolver
+    price_sampler = PriceSampler(
+        store,
+        price_source,
+        clock,
+        mode=str(settings.mode),
+        sample_seconds=settings.price_sample_seconds,
+        tail_seconds=settings.price_sample_tail_seconds,
+        tail_window_seconds=settings.price_sample_tail_window,
+        drain_seconds=settings.book_drain_seconds,
+        force_seconds=settings.price_sample_force_seconds,
+    )
+    return store, gamma, recorder, resolver, price_sampler
 
 
 async def run_backfill(settings: Settings) -> int:
     """Sapu SEMUA ronde belum-resolve (label outcome dari Gamma). Kembalikan jumlah."""
     log = structlog.get_logger()
-    store, _gamma, _recorder, resolver = await build_runtime(settings)
+    store, _gamma, _recorder, resolver, _sampler = await build_runtime(settings)
     try:
         n = await resolver.backfill()
         log.info("backfill_complete", resolved=n)
@@ -242,11 +274,13 @@ async def main_async(
     gamma: GammaClient
     recorder: Recorder
     resolver: Resolver | None
+    price_sampler: PriceSampler | None
     if demo:
         store, gamma, recorder = await build_demo_runtime(settings)
         resolver = None  # demo pakai jalur resolusi inline (DemoGamma)
+        price_sampler = None  # demo: data fixture sintetik, sampler tak diperlukan
     else:
-        store, gamma, recorder, resolver = await build_runtime(settings)
+        store, gamma, recorder, resolver, price_sampler = await build_runtime(settings)
 
     shutdown = asyncio.Event()
     _install_signal_handlers(shutdown, log)
@@ -257,6 +291,7 @@ async def main_async(
             gamma=gamma,
             recorder=recorder,
             resolver=resolver,
+            price_sampler=price_sampler,
             max_rounds=max_rounds,
             updates_per_round=updates_per_round,
             shutdown=shutdown,

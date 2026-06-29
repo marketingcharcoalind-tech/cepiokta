@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # Discovery resilien (Bug B4): kegagalan transient TIDAK mematikan soak.
     gamma_discovery_retry: bool = True
     gamma_discovery_max_backoff_seconds: int = 15
+    # Price sampler (Bug B9): rekam TRAJEKTORI harga BTC/USD selama ronde.
+    price_sample_seconds: float = 2.0  # cadence normal (poll & write-on-change)
+    price_sample_tail_seconds: float = 0.5  # cadence ekor-window (presisi tinggi)
+    price_sample_tail_window: int = 60  # N detik terakhir = ekor-window
+    price_sample_force_seconds: float = 25.0  # tulis min. 1x per interval ini (heartbeat feed)
 
     # --- strategy params (lihat docs/05) ---
     t_entry_sec: int = 20
@@ -215,6 +220,7 @@ class Settings(BaseSettings):
         "book_drain_seconds",
         "recorder_heartbeat_seconds",
         "fee_exponent",
+        "price_sample_tail_window",
     )
     @classmethod
     def _check_positive_int(cls, v: int, info: object) -> int:
@@ -230,6 +236,19 @@ class Settings(BaseSettings):
         """Interval poll harus > 0."""
         if v <= 0:
             raise ValueError(f"book_poll_seconds harus > 0, dapat {v}")
+        return v
+
+    @field_validator(
+        "price_sample_seconds",
+        "price_sample_tail_seconds",
+        "price_sample_force_seconds",
+    )
+    @classmethod
+    def _check_price_sample_seconds(cls, v: float, info: object) -> float:
+        """Cadence sampler harga harus > 0."""
+        if v <= 0:
+            field_name = getattr(info, "field_name", "value")
+            raise ValueError(f"{field_name} harus > 0, dapat {v}")
         return v
 
     @field_validator("book_persist_mode")

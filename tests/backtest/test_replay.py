@@ -527,3 +527,116 @@ class TestStreamingLoader:
         assert new.final_balance == old.final_balance
         assert new.results == old.results
         assert new.diagnostics == old.diagnostics
+
+
+# ----- B9: moving price trajectory → entries > 0 -----
+
+
+class TestMovingPriceReconstruct:
+    def test_moving_signals_give_varying_btc_price(self) -> None:
+        rnd = _resolved_round(0)
+        # banyak snapshot di sepanjang window
+        ts0 = WINDOW_END - timedelta(seconds=60)
+        snaps = [
+            BookSnapshot(
+                rnd.round_no,
+                UP,
+                ts0 + timedelta(seconds=i * 5),
+                Decimal("0.88"),
+                Decimal("0.90"),
+                Decimal("100"),
+                Decimal("100"),
+                False,
+                None,
+                "readonly",
+            )
+            for i in range(12)
+        ] + [
+            BookSnapshot(
+                rnd.round_no,
+                DOWN,
+                ts0 + timedelta(seconds=i * 5),
+                Decimal("0.08"),
+                Decimal("0.12"),
+                Decimal("100"),
+                Decimal("100"),
+                False,
+                None,
+                "readonly",
+            )
+            for i in range(12)
+        ]
+        # deret sinyal harga BERGERAK (naik) — trajektori yang direkam sampler.
+        signals = [
+            Signal(
+                rnd.round_no,
+                ts0 + timedelta(seconds=i * 5),
+                Decimal("65000") + Decimal(i * 20),
+                Decimal(i * 20),
+                60.0 - i * 5,
+                Decimal("0"),
+                "UP",
+                Decimal("0"),
+                Decimal("0"),
+            )
+            for i in range(12)
+        ]
+        ticks = reconstruct_ticks(rnd, snaps, signals)
+        prices = {t.btc_price for t in ticks}
+        assert len(prices) > 1  # btc_price BERGERAK (bukan beku di start_price)
+
+    async def test_replay_enters_with_moving_price(self) -> None:
+        # Regresi B9: harga bergerak → delta != 0 → entry > 0 (dulu 0 entry).
+        store = await Store.open(":memory:")
+        try:
+            rnd = _resolved_round(0)
+            await store.upsert_round(rnd)
+            await store.set_resolution(rnd.round_no, Outcome.UP)
+            ts0 = WINDOW_END - timedelta(seconds=30)
+            # book sepanjang window
+            for i in range(6):
+                ts = ts0 + timedelta(seconds=i * 5)
+                await store.insert_book_snapshot(
+                    rnd.round_no,
+                    OrderBook(
+                        UP,
+                        ts,
+                        [BookLevel(Decimal("0.88"), Decimal("100"))],
+                        [BookLevel(Decimal("0.90"), Decimal("100"))],
+                    ),
+                    mode="readonly",
+                )
+                await store.insert_book_snapshot(
+                    rnd.round_no,
+                    OrderBook(
+                        DOWN,
+                        ts,
+                        [BookLevel(Decimal("0.08"), Decimal("100"))],
+                        [BookLevel(Decimal("0.12"), Decimal("100"))],
+                    ),
+                    mode="readonly",
+                )
+                # harga naik kuat → UP memimpin meyakinkan.
+                await store.insert_signal(
+                    Signal(
+                        rnd.round_no,
+                        ts,
+                        Decimal("65000") + Decimal(i * 100),
+                        Decimal(i * 100),
+                        30.0 - i * 5,
+                        Decimal("0"),
+                        "UP",
+                        Decimal("0"),
+                        Decimal("0"),
+                    ),
+                    mode="readonly",
+                )
+
+            cfg = make_config()
+            entered = 0
+            async for r, ticks in load_round_replays(store):
+                res = ReplayEngine(cfg).run([(r, ticks)])
+                entered += res.rounds_entered
+            assert entered > 0  # ada entry (dulu 0 karena harga beku)
+        finally:
+            await store.close()
