@@ -16,12 +16,13 @@ import argparse
 import asyncio
 import math
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from btcbot.backtest.replay import (
+    ENTRY_REASON_KEYS,
     ReplayConfig,
     ReplayEngine,
     ReplaySummary,
@@ -97,6 +98,8 @@ class BacktestReport:
     fills_total: int = 0
     fok_rejected_empty_book: int = 0
     signal_no_fill_rate: Decimal = Decimal("0")
+    # Entry diagnostics (Task G2): hitungan alasan Strategy NoOp jalur entry + ENTER.
+    entry_reason_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +261,7 @@ def build_report(summary: ReplaySummary, starting_balance: Decimal) -> BacktestR
         fills_total=summary.fills_total,
         fok_rejected_empty_book=summary.fok_rejected_empty_book,
         signal_no_fill_rate=summary.signal_no_fill_rate,
+        entry_reason_counts=dict(summary.entry_reason_counts),
     )
 
 
@@ -383,6 +387,12 @@ def format_report(report: BacktestReport) -> str:
             f"  [{_fmt(b.lo, '0.01')},{_fmt(b.hi, '0.01')})  {b.count:>4}  "
             f"{_fmt(b.predicted, '0.001'):>9}  {_fmt(b.realized, '0.001'):>8}"
         )
+    lines.append("")
+    lines.append("=== ENTRY DIAGNOSTICS ===")
+    width = max(len(k) for k in ENTRY_REASON_KEYS)
+    for key in ENTRY_REASON_KEYS:
+        count = report.entry_reason_counts.get(key, 0)
+        lines.append(f"  {key:<{width}} : {count}")
     return "\n".join(lines)
 
 

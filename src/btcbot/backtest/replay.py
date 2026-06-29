@@ -47,6 +47,7 @@ from btcbot.domain.strategy import (
     Exit,
     Hedge,
     MarketBook,
+    NoOp,
     Strategy,
     StrategyParams,
 )
@@ -213,6 +214,28 @@ ROUND_FILLED = "FILLED"  # >= 1 entry fill
 ROUND_SIGNAL_NO_FILL = "SIGNAL_NO_FILL"  # >= 1 EnterOrder tapi 0 fill (likuiditas ekor)
 ROUND_NO_SIGNAL = "NO_SIGNAL"  # 0 EnterOrder (edge memang tak ada/tipis)
 
+# Entry diagnostics (Task G2 — alasan Strategy NoOp di jalur entry + ENTER).
+# String HARUS sama persis dengan reason di domain/strategy._consider_entry.
+ENTRY_REASON_TIME_LEFT = "time_left>t_entry"
+ENTRY_REASON_DELTA = "abs_delta<threshold"
+ENTRY_REASON_ASK_LOW = "ask<min_price"
+ENTRY_REASON_ASK_HIGH = "ask>max_price"
+ENTRY_REASON_EDGE = "net_edge<min_edge"
+ENTRY_REASON_ENTER = "ENTER"  # EnterOrder dipancarkan (lolos semua gerbang)
+ENTRY_REASON_KEYS: tuple[str, ...] = (
+    ENTRY_REASON_TIME_LEFT,
+    ENTRY_REASON_DELTA,
+    ENTRY_REASON_ASK_LOW,
+    ENTRY_REASON_ASK_HIGH,
+    ENTRY_REASON_EDGE,
+    ENTRY_REASON_ENTER,
+)
+_ENTRY_NOOP_REASONS = frozenset(ENTRY_REASON_KEYS) - {ENTRY_REASON_ENTER}
+
+
+def _new_entry_reasons() -> dict[str, int]:
+    return dict.fromkeys(ENTRY_REASON_KEYS, 0)
+
 
 @dataclass(frozen=True, slots=True)
 class RoundObservation:
@@ -222,6 +245,8 @@ class RoundObservation:
     enter_orders_yielded: int
     fills: int  # entry fill sukses
     fok_rejected_empty_book: int
+    # Entry diagnostics (Task G2): hitungan alasan NoOp jalur entry + ENTER.
+    entry_reasons: dict[str, int] = field(default_factory=_new_entry_reasons)
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +268,8 @@ class ReplaySummary:
     enter_orders_yielded: int = 0
     fills_total: int = 0
     fok_rejected_empty_book: int = 0
+    # Entry diagnostics (Task G2): hitungan alasan NoOp jalur entry + ENTER.
+    entry_reason_counts: dict[str, int] = field(default_factory=_new_entry_reasons)
 
     @property
     def signal_no_fill_rate(self) -> Decimal:
@@ -264,6 +291,7 @@ class _ObsTally:
         self.enter_orders_yielded = 0
         self.fills_total = 0
         self.fok_rejected_empty_book = 0
+        self.entry_reasons: dict[str, int] = _new_entry_reasons()
 
     def add(self, obs: RoundObservation) -> None:
         """Roll-up satu observasi ronde."""
@@ -276,9 +304,11 @@ class _ObsTally:
         self.enter_orders_yielded += obs.enter_orders_yielded
         self.fills_total += obs.fills
         self.fok_rejected_empty_book += obs.fok_rejected_empty_book
+        for key, count in obs.entry_reasons.items():
+            self.entry_reasons[key] = self.entry_reasons.get(key, 0) + count
 
     def as_kwargs(self) -> dict[str, int]:
-        """Field observability untuk konstruksi :class:`ReplaySummary`."""
+        """Field observability int untuk konstruksi :class:`ReplaySummary`."""
         return {
             "rounds_filled": self.rounds_filled,
             "rounds_signal_no_fill": self.rounds_signal_no_fill,
@@ -287,6 +317,10 @@ class _ObsTally:
             "fills_total": self.fills_total,
             "fok_rejected_empty_book": self.fok_rejected_empty_book,
         }
+
+    def entry_counts(self) -> dict[str, int]:
+        """Hitungan alasan entry (Task G2) sebagai dict baru (stabil)."""
+        return dict(self.entry_reasons)
 
 
 class _RoundLedger:
@@ -383,6 +417,7 @@ class ReplayEngine:
         limits = self._round_limits(rnd)
         n = len(ticks)
         closed_early = False
+        entry_reasons = _new_entry_reasons()
 
         for i, tick in enumerate(ticks):
             clock.set(tick.ts)
@@ -400,10 +435,13 @@ class ReplayEngine:
 
             for decision in self._strategy.on_tick(signal, mbook, position):
                 if isinstance(decision, EnterOrder):
+                    entry_reasons[ENTRY_REASON_ENTER] += 1  # G2: lolos semua gerbang
                     ledger.enter_orders_yielded += 1  # R-A1: sinyal terbentuk
                     self._exec_entry(
                         decision, signal, rnd, mbook, exec_tick, ledger, limits, bankroll
                     )
+                elif isinstance(decision, NoOp) and decision.reason in _ENTRY_NOOP_REASONS:
+                    entry_reasons[decision.reason] += 1  # G2: alasan gerbang entry
                 elif isinstance(decision, Hedge):
                     self._exec_hedge(decision, rnd, exec_tick, ledger, limits)
                 elif isinstance(decision, Exit) and self._exec_exit(
@@ -413,7 +451,7 @@ class ReplayEngine:
             if closed_early:
                 break
 
-        obs = self._classify(ledger)
+        obs = self._classify(ledger, entry_reasons)
         if not ledger.entered:
             return None, None, obs
         result = self._settle(rnd, ledger, bankroll)
@@ -430,8 +468,8 @@ class ReplayEngine:
         return result, diag, obs
 
     @staticmethod
-    def _classify(ledger: _RoundLedger) -> RoundObservation:
-        """Klasifikasikan ronde (R-A3) dari flag lokal ledger."""
+    def _classify(ledger: _RoundLedger, entry_reasons: dict[str, int]) -> RoundObservation:
+        """Klasifikasikan ronde (R-A3) dari flag lokal ledger + alasan entry (G2)."""
         if ledger.entered:
             classification = ROUND_FILLED
         elif ledger.enter_orders_yielded > 0:
@@ -443,6 +481,7 @@ class ReplayEngine:
             enter_orders_yielded=ledger.enter_orders_yielded,
             fills=ledger.entry_fills,
             fok_rejected_empty_book=ledger.fok_rejected_empty_book,
+            entry_reasons=entry_reasons,
         )
 
     def run(
@@ -477,6 +516,7 @@ class ReplayEngine:
             final_balance=balance,
             results=tuple(results),
             diagnostics=tuple(diagnostics),
+            entry_reason_counts=obs_tally.entry_counts(),
             **obs_tally.as_kwargs(),
         )
 
@@ -801,6 +841,7 @@ class RunAccumulator:
             final_balance=self._balance,
             results=tuple(self._results),
             diagnostics=tuple(self._diags),
+            entry_reason_counts=self._obs.entry_counts(),
             **self._obs.as_kwargs(),
         )
 
