@@ -24,9 +24,9 @@ from btcbot import __version__
 from btcbot.adapters.chainlink import FailoverPriceSource, PriceUnavailableError
 from btcbot.adapters.clob_ws import HttpClobWS
 from btcbot.adapters.clock import SystemClock
-from btcbot.adapters.gamma import HttpGammaClient
+from btcbot.adapters.gamma import TRANSIENT_UPSTREAM_ERRORS, HttpGammaClient
 from btcbot.app.demo import build_demo_runtime
-from btcbot.app.discovery import discover_with_retry
+from btcbot.app.discovery import discover_with_retry, run_supervised
 from btcbot.config.settings import Settings, get_settings
 from btcbot.data.recorder import Recorder
 from btcbot.data.resolver import Resolver
@@ -135,9 +135,19 @@ async def run_readonly(  # noqa: PLR0913
         # fallback inline (mode demo) untuk ronde yang sudah resolved seketika.
         resolved_str: str | None = None
         if resolver is not None:
-            n = await resolver.resolve_due()
-            if n:
-                log.info("rounds_resolved", count=n)
+            # Resilien (Bug B5): hiccup transient Gamma TIDAK mematikan loop —
+            # resolusi tidak ephemeral, dicoba lagi loop berikut / --resolve-backfill.
+            try:
+                n = await resolver.resolve_due()
+                if n:
+                    log.info("rounds_resolved", count=n)
+            except TRANSIENT_UPSTREAM_ERRORS as exc:
+                log.warning(
+                    "resolve_retry",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    next_attempt="next_loop",
+                )
         else:
             inline = await gamma.get_market(meta.condition_id)
             if inline.outcome is not None:
@@ -241,7 +251,7 @@ async def main_async(
     shutdown = asyncio.Event()
     _install_signal_handlers(shutdown, log)
 
-    try:
+    async def _loop_body() -> int:
         return await run_readonly(
             settings=settings,
             gamma=gamma,
@@ -249,6 +259,16 @@ async def main_async(
             resolver=resolver,
             max_rounds=max_rounds,
             updates_per_round=updates_per_round,
+            shutdown=shutdown,
+            logger=log,
+        )
+
+    try:
+        # Supervisor global (Bug B5): pulih dari exception tak terduga; berhenti
+        # hanya saat shutdown sengaja atau error FATAL (config/auth).
+        return await run_supervised(
+            _loop_body,
+            settings=settings,
             shutdown=shutdown,
             logger=log,
         )

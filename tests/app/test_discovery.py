@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
 from btcbot.adapters.gamma import GammaError
-from btcbot.app.discovery import discover_with_retry, discovery_backoff
+from btcbot.app.discovery import (
+    discover_with_retry,
+    discovery_backoff,
+    run_supervised,
+)
 from btcbot.config.settings import Settings
 from btcbot.domain.models import MarketStatus, RoundMeta
 
@@ -150,3 +155,88 @@ class TestDiscoverWithRetry:
         )
         assert all(d <= 3.0 for d in sleep.delays)
         assert sleep.delays == [1.0, 2.0, 3.0]  # 5s di-clamp ke cap 3
+
+
+# ----- global supervisor (Bug B5) -----
+
+
+class _Counter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+
+def _make_loop_body(behaviors: list[object], counter: _Counter) -> Callable[[], Awaitable[int]]:
+    async def _body() -> int:
+        counter.calls += 1
+        item = behaviors[min(counter.calls - 1, len(behaviors) - 1)]
+        if isinstance(item, Exception):
+            raise item
+        assert isinstance(item, int)
+        return item
+
+    return _body
+
+
+class TestRunSupervised:
+    async def test_recovers_from_unexpected_then_succeeds(self) -> None:
+        # 2x exception tak terduga lalu sukses → proses hidup, restart_count benar.
+        counter = _Counter()
+        body = _make_loop_body([RuntimeError("ws drop"), ValueError("hiccup"), 7], counter)
+        sleep = _RecordingSleep()
+        result = await run_supervised(body, settings=_settings(), sleep=sleep)
+        assert result == 7  # akhirnya selesai normal
+        assert counter.calls == 3  # 2 gagal + 1 sukses
+        assert sleep.delays == [1.0, 2.0]  # backoff dua kali
+
+    async def test_fatal_error_propagates(self) -> None:
+        # Error fatal (auth) → TIDAK ditelan supervisor.
+        counter = _Counter()
+        body = _make_loop_body([_FatalAuthError("401")], counter)
+        with pytest.raises(_FatalAuthError):
+            await run_supervised(body, settings=_settings(), fatal_errors=(_FatalAuthError,))
+        assert counter.calls == 1
+
+    async def test_default_fatal_includes_http_status_error(self) -> None:
+        import httpx  # noqa: PLC0415
+
+        request = httpx.Request("GET", "https://gamma")
+        response = httpx.Response(401, request=request)
+        err = httpx.HTTPStatusError("unauthorized", request=request, response=response)
+        counter = _Counter()
+        body = _make_loop_body([err], counter)
+        with pytest.raises(httpx.HTTPStatusError):
+            await run_supervised(body, settings=_settings())
+        assert counter.calls == 1
+
+    async def test_shutdown_before_start_no_run(self) -> None:
+        counter = _Counter()
+        body = _make_loop_body([1], counter)
+        shutdown = asyncio.Event()
+        shutdown.set()
+        await run_supervised(body, settings=_settings(), shutdown=shutdown)
+        assert counter.calls == 0  # tidak menjalankan loop saat sudah shutdown
+
+    async def test_shutdown_during_backoff_stops(self) -> None:
+        # Gagal sekali → saat backoff, shutdown ter-set → berhenti (tidak restart).
+        counter = _Counter()
+        body = _make_loop_body([RuntimeError("x"), 5], counter)
+        shutdown = asyncio.Event()
+        shutdown.set()
+
+        async def _sleep(_d: float) -> None:
+            return None
+
+        await run_supervised(body, settings=_settings(), shutdown=shutdown, sleep=_sleep)
+        # shutdown sudah set → tidak pernah menjalankan body.
+        assert counter.calls == 0
+
+    async def test_backoff_capped(self) -> None:
+        counter = _Counter()
+        # 5x gagal lalu sukses → backoff mengikuti cap.
+        body = _make_loop_body([RuntimeError("x")] * 5 + [0], counter)
+        sleep = _RecordingSleep()
+        await run_supervised(
+            body, settings=_settings(gamma_discovery_max_backoff_seconds=15), sleep=sleep
+        )
+        assert sleep.delays == [1.0, 2.0, 5.0, 15.0, 15.0]
+        assert max(sleep.delays) <= 15.0

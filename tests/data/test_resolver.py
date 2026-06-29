@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 
 from btcbot.adapters.chainlink import FakePriceSource
 from btcbot.adapters.clock import SimClock
-from btcbot.adapters.gamma import HttpGammaClient
+from btcbot.adapters.gamma import GammaError, HttpGammaClient
 from btcbot.data.resolver import Resolver
 from btcbot.data.store import Store
 from btcbot.domain.models import Outcome, Round, RoundStatus
@@ -67,6 +67,21 @@ class FakeLookup:
 
     async def get_resolution(self, condition_id: str) -> Outcome | None:
         return self._mapping.get(condition_id)
+
+
+class RaisingLookup:
+    """ResolutionLookup mock: beberapa condition_id raise (transient), sisanya Outcome."""
+
+    def __init__(self, mapping: dict[str, Outcome | Exception | None]) -> None:
+        self._mapping = mapping
+        self.calls: list[str] = []
+
+    async def get_resolution(self, condition_id: str) -> Outcome | None:
+        self.calls.append(condition_id)
+        item = self._mapping.get(condition_id)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 class TestResolveRound:
@@ -187,6 +202,45 @@ class TestBackfill:
         resolver = Resolver(store, FakeLookup({"0xc": Outcome.UP}), SimClock(NOW))
         assert await resolver.backfill() == 1
         assert await resolver.backfill() == 0  # sudah resolved → tak ada lagi
+
+
+class TestResolveDueResilient:
+    """Bug B5: kegagalan transient SATU ronde tak menggagalkan seluruh batch."""
+
+    async def test_one_round_fails_others_resolved(self, store: Store) -> None:
+        for i in range(3):
+            await store.upsert_round(
+                _round(400 + i, f"0xc{i}", window_end=NOW - timedelta(hours=1))
+            )
+        # condition 0xc1 raise transient (ConnectTimeout-equivalent via GammaError);
+        # 0xc0 & 0xc2 sukses → keduanya tetap ter-resolve (skip granular).
+        mapping: dict[str, Outcome | Exception | None] = {
+            "0xc0": Outcome.UP,
+            "0xc1": GammaError("connect timeout"),
+            "0xc2": Outcome.DOWN,
+        }
+        lookup = RaisingLookup(mapping)
+        resolver = Resolver(store, lookup, SimClock(NOW))
+
+        with capture_logs() as logs:
+            n = await resolver.resolve_due(NOW)
+
+        assert n == 2  # dua sukses, satu di-skip
+        assert (await store.get_resolution(400)).resolved_outcome is Outcome.UP  # type: ignore[union-attr]
+        assert (await store.get_resolution(402)).resolved_outcome is Outcome.DOWN  # type: ignore[union-attr]
+        # ronde yang gagal tetap unresolved (dicoba lagi nanti) + ada log skip.
+        failed = await store.get_resolution(401)
+        assert failed is not None
+        assert failed.resolved_outcome is None
+        assert "resolve_round_skip" in [e["event"] for e in logs]
+
+    async def test_fatal_error_propagates(self, store: Store) -> None:
+        # Error fatal (mis. auth) BUKAN transient → resolve_due TIDAK menelannya.
+        await store.upsert_round(_round(500, "0xc", window_end=NOW - timedelta(hours=1)))
+        lookup = RaisingLookup({"0xc": RuntimeError("auth/config fatal")})
+        resolver = Resolver(store, lookup, SimClock(NOW))
+        with pytest.raises(RuntimeError):
+            await resolver.resolve_due(NOW)
 
 
 class TestResolverWithGammaClient:

@@ -77,6 +77,19 @@ class GammaSchemaError(GammaError):
     """Respons Gamma tidak sesuai skema (field wajib hilang/tak terbaca)."""
 
 
+# Klasifikasi error upstream untuk pemulihan resilien (Bug B4/B5):
+# TRANSIENT = boleh di-retry/skip (collector long-running tak boleh mati).
+# ``GammaError`` membungkus 429/5xx/transport-after-retry/no-round; tambah
+# httpx transport/timeout mentah untuk jaga-jaga jalur yang belum dibungkus.
+# Auth/config (``httpx.HTTPStatusError`` 4xx, ``ValueError``) BUKAN transient
+# (fatal) → biarkan propagate.
+TRANSIENT_UPSTREAM_ERRORS: tuple[type[Exception], ...] = (
+    GammaError,
+    httpx.TransportError,
+    httpx.TimeoutException,
+)
+
+
 class GammaClient(Protocol):
     """Kontrak discovery market (docs/08 §8.2)."""
 

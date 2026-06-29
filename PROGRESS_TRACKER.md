@@ -135,6 +135,7 @@ Fase 4 [          ] 0/3     G4: belum
 | RES | Resolution recorder — RESOLVED (label outcome ronde) | 2026-06-26 | — | Gamma primer + Chainlink cross-check; settlement_price/resolution_source; resolve_due + `--resolve-backfill`; mismatch di-log | ✅ |
 | B-freeze | Recorder freeze — RESOLVED (consume_market gantung saat window tutup) | 2026-06-27 | soak mati 18 jam | deadline window_end+drain; iterasi manual + wait_for poll; aclose stream stop reconnect abadi; heartbeat | ✅ |
 | B4 | Discovery crash — RESOLVED (GammaError transient mematikan soak) | 2026-06-27 | soak mati saat gap window/hiccup Gamma | `app/discovery.discover_with_retry`: retry tak terbatas + backoff 1→2→5→cap (`GAMMA_DISCOVERY_MAX_BACKOFF_SECONDS`); transient(GammaError) retry vs fatal(auth/config) raise; log `discover_retry` | ✅ |
+| B5 | Resolver crash + jaring pengaman global — RESOLVED | 2026-06-27 | soak exit total saat httpx timeout di resolver | (1) `resolve_due` per-round try/except (skip transient granular, fatal raise); (2) cli bungkus `resolve_due` (log `resolve_retry`, lanjut); (3) `run_supervised` global: pulih dari exception tak terduga + backoff ter-cap (`loop_supervisor_restart`), hanya berhenti saat shutdown/fatal. `TRANSIENT_UPSTREAM_ERRORS` di gamma | ✅ |
 
 ## 🧠 Decision Log (ADR ringkas)
 | Tgl | Keputusan | Alasan | ADR file |

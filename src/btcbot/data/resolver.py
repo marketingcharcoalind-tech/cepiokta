@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol
 import structlog
 
 from btcbot.adapters.chainlink import PriceUnavailableError
+from btcbot.adapters.gamma import TRANSIENT_UPSTREAM_ERRORS
 from btcbot.domain.models import Outcome
 
 if TYPE_CHECKING:
@@ -124,13 +125,29 @@ class Resolver:
         return tick.price
 
     async def resolve_due(self, now: datetime | None = None, *, limit: int | None = None) -> int:
-        """Resolusikan semua ronde yang due (``window_end < now`` & belum resolved)."""
+        """Resolusikan semua ronde yang due (``window_end < now`` & belum resolved).
+
+        **Resilien (Bug B5)**: kegagalan transient (timeout/5xx/transport/GammaError)
+        pada SATU ronde TIDAK menggagalkan seluruh batch — ronde itu di-skip
+        (resolusi tidak ephemeral; bisa dicoba lagi nanti / via ``--resolve-backfill``),
+        sisanya tetap diproses. Error FATAL (auth/config) tetap di-propagate.
+        Kembalikan jumlah ronde yang sukses dilabeli.
+        """
         moment = now or self._clock.now()
         rounds = await self._store.get_unresolved_rounds(moment, limit=limit)
         resolved = 0
         for rnd in rounds:
-            if await self.resolve_round(rnd):
-                resolved += 1
+            try:
+                if await self.resolve_round(rnd):
+                    resolved += 1
+            except TRANSIENT_UPSTREAM_ERRORS as exc:
+                _log.warning(
+                    "resolve_round_skip",
+                    round_no=rnd.round_no,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                continue
         return resolved
 
     async def backfill(self) -> int:
