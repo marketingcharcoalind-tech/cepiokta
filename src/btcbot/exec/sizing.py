@@ -265,12 +265,14 @@ class SizingDiagnostic:
     ask: Decimal
     bankroll: Decimal
     depth_available: Decimal
+    fill_safety: Decimal
     size_kelly: Decimal
     cap_notional: Decimal
     cap_bankroll: Decimal
     cap_depth: Decimal
     raw_size: Decimal
     rounded_size: Decimal
+    returned_size: Decimal
     min_order_size: Decimal
     tick_size: Decimal
 
@@ -315,6 +317,8 @@ def diagnose_size(
         classification = SIZING_ROUNDED_BELOW_MIN
     else:
         classification = SIZING_SUCCESS
+    # returned_size mencerminkan EXACT nilai yang dikembalikan size() (0 bila < min).
+    returned = rounded if rounded >= limits.min_order_size else _ZERO
     return SizingDiagnostic(
         binding_cap=binding_cap,
         binding_label=SIZING_BINDING_LABELS.get(binding_cap, "NONE"),
@@ -323,12 +327,14 @@ def diagnose_size(
         ask=ask,
         bankroll=bankroll,
         depth_available=depth,
+        fill_safety=limits.fill_safety,
         size_kelly=size_kelly,
         cap_notional=cap_notional,
         cap_bankroll=cap_bankroll,
         cap_depth=cap_depth,
         raw_size=raw,
         rounded_size=rounded,
+        returned_size=returned,
         min_order_size=limits.min_order_size,
         tick_size=limits.tick_size,
     )

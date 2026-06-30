@@ -249,6 +249,41 @@ def _new_sizing_class() -> dict[str, int]:
     return dict.fromkeys(SIZING_CLASS_KEYS, 0)
 
 
+# Ratio buckets (Task G5): histogram memori-konstan untuk rasio depth/min &
+# raw/min. Ambang 1.0 = batas "satu min-order" (di bawahnya = terlalu kecil).
+RATIO_BUCKET_KEYS: tuple[str, ...] = (
+    "<0.1",
+    "0.1-0.5",
+    "0.5-1",
+    "1-2",
+    "2-5",
+    "5-10",
+    ">=10",
+)
+
+
+def _new_ratio_buckets() -> dict[str, int]:
+    return dict.fromkeys(RATIO_BUCKET_KEYS, 0)
+
+
+_RATIO_EDGES: tuple[tuple[Decimal, str], ...] = (
+    (Decimal("0.1"), "<0.1"),
+    (Decimal("0.5"), "0.1-0.5"),
+    (_ONE, "0.5-1"),
+    (Decimal("2"), "1-2"),
+    (Decimal("5"), "2-5"),
+    (Decimal("10"), "5-10"),
+)
+
+
+def _ratio_bucket(ratio: Decimal) -> str:
+    """Petakan rasio (>= 0) ke salah satu :data:`RATIO_BUCKET_KEYS`."""
+    for edge, label in _RATIO_EDGES:
+        if ratio < edge:
+            return label
+    return ">=10"
+
+
 @dataclass(frozen=True, slots=True)
 class SizingStat:
     """Ringkasan distribusi sizing (share/cap). Kuantil = estimasi P-square."""
@@ -514,6 +549,10 @@ class ReplaySummary:
     sizing_notional_stats: SizingStat = field(default_factory=SizingStat)
     sizing_bankroll_stats: SizingStat = field(default_factory=SizingStat)
     sizing_depth_stats: SizingStat = field(default_factory=SizingStat)
+    # Depth diagnostics (Task G5): depth mentah + rasio terhadap min_order_size.
+    depth_available_stats: SizingStat = field(default_factory=SizingStat)
+    depth_ratio_buckets: dict[str, int] = field(default_factory=_new_ratio_buckets)
+    raw_ratio_buckets: dict[str, int] = field(default_factory=_new_ratio_buckets)
 
     @property
     def signal_no_fill_rate(self) -> Decimal:
@@ -545,6 +584,10 @@ class _ObsTally:
         self.notional_stats = _StreamStats()
         self.bankroll_stats = _StreamStats()
         self.depth_stats = _StreamStats()
+        # --- depth diagnostics (Task G5) ---
+        self.depth_available_stats = _StreamStats()
+        self.depth_ratio_buckets: dict[str, int] = _new_ratio_buckets()
+        self.raw_ratio_buckets: dict[str, int] = _new_ratio_buckets()
 
     def add(self, obs: RoundObservation) -> None:
         """Roll-up satu observasi ronde."""
@@ -572,6 +615,11 @@ class _ObsTally:
             self.notional_stats.add(sd.cap_notional)
             self.bankroll_stats.add(sd.cap_bankroll)
             self.depth_stats.add(sd.cap_depth)
+            # G5: depth mentah + rasio terhadap min_order_size.
+            self.depth_available_stats.add(sd.depth_available)
+            if sd.min_order_size > _ZERO:
+                self.depth_ratio_buckets[_ratio_bucket(sd.depth_available / sd.min_order_size)] += 1
+                self.raw_ratio_buckets[_ratio_bucket(sd.raw_size / sd.min_order_size)] += 1
 
     def as_kwargs(self) -> dict[str, int]:
         """Field observability int untuk konstruksi :class:`ReplaySummary`."""
@@ -599,6 +647,14 @@ class _ObsTally:
     def sizing_class_counts(self) -> dict[str, int]:
         """Hitungan klasifikasi min-order (Task G4) sebagai dict baru (stabil)."""
         return dict(self.sizing_class)
+
+    def depth_ratio_counts(self) -> dict[str, int]:
+        """Bucket rasio depth_available/min_order_size (Task G5) sebagai dict baru."""
+        return dict(self.depth_ratio_buckets)
+
+    def raw_ratio_counts(self) -> dict[str, int]:
+        """Bucket rasio raw_size/min_order_size (Task G5) sebagai dict baru."""
+        return dict(self.raw_ratio_buckets)
 
 
 class _RoundLedger:
@@ -814,6 +870,9 @@ class ReplayEngine:
             sizing_notional_stats=obs_tally.notional_stats.summary(),
             sizing_bankroll_stats=obs_tally.bankroll_stats.summary(),
             sizing_depth_stats=obs_tally.depth_stats.summary(),
+            depth_available_stats=obs_tally.depth_available_stats.summary(),
+            depth_ratio_buckets=obs_tally.depth_ratio_counts(),
+            raw_ratio_buckets=obs_tally.raw_ratio_counts(),
             **obs_tally.as_kwargs(),
         )
 
@@ -1165,6 +1224,9 @@ class RunAccumulator:
             sizing_notional_stats=self._obs.notional_stats.summary(),
             sizing_bankroll_stats=self._obs.bankroll_stats.summary(),
             sizing_depth_stats=self._obs.depth_stats.summary(),
+            depth_available_stats=self._obs.depth_available_stats.summary(),
+            depth_ratio_buckets=self._obs.depth_ratio_counts(),
+            raw_ratio_buckets=self._obs.raw_ratio_counts(),
             **self._obs.as_kwargs(),
         )
 

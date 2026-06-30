@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from btcbot.backtest.replay import (
     ENTRY_REASON_KEYS,
     FILL_FAIL_KEYS,
+    RATIO_BUCKET_KEYS,
     ReplayConfig,
     ReplayEngine,
     ReplaySummary,
@@ -114,6 +115,10 @@ class BacktestReport:
     sizing_notional_stats: SizingStat = field(default_factory=SizingStat)
     sizing_bankroll_stats: SizingStat = field(default_factory=SizingStat)
     sizing_depth_stats: SizingStat = field(default_factory=SizingStat)
+    # Depth diagnostics (Task G5): depth mentah + rasio terhadap min_order_size.
+    depth_available_stats: SizingStat = field(default_factory=SizingStat)
+    depth_ratio_buckets: dict[str, int] = field(default_factory=dict)
+    raw_ratio_buckets: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +290,9 @@ def build_report(summary: ReplaySummary, starting_balance: Decimal) -> BacktestR
         sizing_notional_stats=summary.sizing_notional_stats,
         sizing_bankroll_stats=summary.sizing_bankroll_stats,
         sizing_depth_stats=summary.sizing_depth_stats,
+        depth_available_stats=summary.depth_available_stats,
+        depth_ratio_buckets=dict(summary.depth_ratio_buckets),
+        raw_ratio_buckets=dict(summary.raw_ratio_buckets),
     )
 
 
@@ -423,6 +431,7 @@ def format_report(report: BacktestReport) -> str:
         count = report.fill_failure_counts.get(key, 0)
         lines.append(f"  {key:<{ff_width}} : {count}")
     lines.extend(_format_sizing_diagnostics(report))
+    lines.extend(_format_depth_diagnostics(report))
     return "\n".join(lines)
 
 
@@ -458,6 +467,25 @@ def _format_sizing_diagnostics(report: BacktestReport) -> list[str]:
     lines.append(f"Bankroll cap : mean={_fmt(bk.mean)} median={_fmt(bk.median)}")
     dp = report.sizing_depth_stats
     lines.append(f"Depth cap    : mean={_fmt(dp.mean)} median={_fmt(dp.median)}")
+    return lines
+
+
+def _format_depth_diagnostics(report: BacktestReport) -> list[str]:
+    """Render section DEPTH DIAGNOSTICS (Task G5)."""
+    total = sum(report.sizing_binding_counts.values())
+    depth_binding = report.sizing_binding_counts.get("DEPTH", 0)
+    pct = (Decimal(depth_binding) / Decimal(total) * Decimal("100")) if total else _ZERO
+    lines = ["", "=== DEPTH DIAGNOSTICS ==="]
+    lines.append(f"depth_available          : {_fmt_stat_dist(report.depth_available_stats)}")
+    lines.append(f"depth_after_fill_safety  : {_fmt_stat_dist(report.sizing_depth_stats)}")
+    lines.append(f"DEPTH binding            : {depth_binding}/{total} ({_fmt(pct, '0.1')}%)")
+    rb_width = max(len(k) for k in RATIO_BUCKET_KEYS)
+    lines.append("depth_available / min_order_size:")
+    for key in RATIO_BUCKET_KEYS:
+        lines.append(f"  {key:<{rb_width}} : {report.depth_ratio_buckets.get(key, 0)}")
+    lines.append("raw_size / min_order_size:")
+    for key in RATIO_BUCKET_KEYS:
+        lines.append(f"  {key:<{rb_width}} : {report.raw_ratio_buckets.get(key, 0)}")
     return lines
 
 
