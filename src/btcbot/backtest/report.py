@@ -28,12 +28,14 @@ from btcbot.backtest.replay import (
     ReplayEngine,
     ReplaySummary,
     RunAccumulator,
+    SizingStat,
     load_round_replays,
     stream_accumulators,
 )
 from btcbot.config.settings import Settings, get_settings
 from btcbot.data.store import Store
 from btcbot.domain.fees import ZeroFee
+from btcbot.exec.sizing import SIZING_BINDING_KEYS, SIZING_CLASS_KEYS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -103,6 +105,15 @@ class BacktestReport:
     entry_reason_counts: dict[str, int] = field(default_factory=dict)
     # Fill-failure diagnostics (Task G3): klasifikasi sebab NO_FILL.
     fill_failure_counts: dict[str, int] = field(default_factory=dict)
+    # Sizing diagnostics (Task G4): cap binding, klasifikasi min-order, distribusi.
+    sizing_binding_counts: dict[str, int] = field(default_factory=dict)
+    sizing_class_counts: dict[str, int] = field(default_factory=dict)
+    sizing_raw_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_rounded_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_kelly_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_notional_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_bankroll_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_depth_stats: SizingStat = field(default_factory=SizingStat)
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +277,14 @@ def build_report(summary: ReplaySummary, starting_balance: Decimal) -> BacktestR
         signal_no_fill_rate=summary.signal_no_fill_rate,
         entry_reason_counts=dict(summary.entry_reason_counts),
         fill_failure_counts=dict(summary.fill_failure_counts),
+        sizing_binding_counts=dict(summary.sizing_binding_counts),
+        sizing_class_counts=dict(summary.sizing_class_counts),
+        sizing_raw_stats=summary.sizing_raw_stats,
+        sizing_rounded_stats=summary.sizing_rounded_stats,
+        sizing_kelly_stats=summary.sizing_kelly_stats,
+        sizing_notional_stats=summary.sizing_notional_stats,
+        sizing_bankroll_stats=summary.sizing_bankroll_stats,
+        sizing_depth_stats=summary.sizing_depth_stats,
     )
 
 
@@ -403,7 +422,43 @@ def format_report(report: BacktestReport) -> str:
     for key in FILL_FAIL_KEYS:
         count = report.fill_failure_counts.get(key, 0)
         lines.append(f"  {key:<{ff_width}} : {count}")
+    lines.extend(_format_sizing_diagnostics(report))
     return "\n".join(lines)
+
+
+def _fmt_stat_dist(stat: SizingStat) -> str:
+    """Baris ringkas distribusi (min/p25/median/mean/p75/max)."""
+    return (
+        f"n={stat.count} min={_fmt(stat.minimum)} p25={_fmt(stat.p25)} "
+        f"median={_fmt(stat.median)} mean={_fmt(stat.mean)} p75={_fmt(stat.p75)} "
+        f"max={_fmt(stat.maximum)}"
+    )
+
+
+def _format_sizing_diagnostics(report: BacktestReport) -> list[str]:
+    """Render section SIZING DIAGNOSTICS (Task G4)."""
+    lines = ["", "=== SIZING DIAGNOSTICS ==="]
+    lines.append("Binding cap:")
+    bc_width = max(len(k) for k in SIZING_BINDING_KEYS)
+    for key in SIZING_BINDING_KEYS:
+        lines.append(f"  {key:<{bc_width}} : {report.sizing_binding_counts.get(key, 0)}")
+    lines.append("Minimum order:")
+    mo_width = max(len(k) for k in SIZING_CLASS_KEYS)
+    for key in SIZING_CLASS_KEYS:
+        lines.append(f"  {key:<{mo_width}} : {report.sizing_class_counts.get(key, 0)}")
+    lines.append(f"Raw size     : {_fmt_stat_dist(report.sizing_raw_stats)}")
+    lines.append(f"Rounded size : {_fmt_stat_dist(report.sizing_rounded_stats)}")
+    k = report.sizing_kelly_stats
+    lines.append(
+        f"Kelly cap    : mean={_fmt(k.mean)} median={_fmt(k.median)} max={_fmt(k.maximum)}"
+    )
+    nt = report.sizing_notional_stats
+    lines.append(f"Notional cap : mean={_fmt(nt.mean)} median={_fmt(nt.median)}")
+    bk = report.sizing_bankroll_stats
+    lines.append(f"Bankroll cap : mean={_fmt(bk.mean)} median={_fmt(bk.median)}")
+    dp = report.sizing_depth_stats
+    lines.append(f"Depth cap    : mean={_fmt(dp.mean)} median={_fmt(dp.median)}")
+    return lines
 
 
 def format_grid(cells: Sequence[GridCell]) -> str:

@@ -51,7 +51,15 @@ from btcbot.domain.strategy import (
     Strategy,
     StrategyParams,
 )
-from btcbot.exec.sizing import SizingLimits, round_to_tick, size
+from btcbot.exec.sizing import (
+    SIZING_BINDING_KEYS,
+    SIZING_CLASS_KEYS,
+    SizingDiagnostic,
+    SizingLimits,
+    diagnose_size,
+    round_to_tick,
+    size,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -224,6 +232,157 @@ def classify_no_fill(  # noqa: PLR0911, PLR0913 - guard eksplisit per-reason
     return FILL_FAIL_UNKNOWN
 
 
+# ----- sizing diagnostics aggregation (Task G4 — observability MURNI) -----
+#
+# Statistik streaming memori-konstan: min/max/mean eksak + kuantil P-square
+# (Jain & Chlamtac 1985), deterministik per urutan input. TIDAK menyimpan
+# riwayat per-tick (hanya 5 marker/kuantil).
+
+_SIZING_QUANTILES: tuple[float, ...] = (0.25, 0.5, 0.75)
+
+
+def _new_sizing_binding() -> dict[str, int]:
+    return dict.fromkeys(SIZING_BINDING_KEYS, 0)
+
+
+def _new_sizing_class() -> dict[str, int]:
+    return dict.fromkeys(SIZING_CLASS_KEYS, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class SizingStat:
+    """Ringkasan distribusi sizing (share/cap). Kuantil = estimasi P-square."""
+
+    count: int = 0
+    minimum: Decimal = _ZERO
+    p25: Decimal = _ZERO
+    median: Decimal = _ZERO
+    mean: Decimal = _ZERO
+    p75: Decimal = _ZERO
+    maximum: Decimal = _ZERO
+
+
+class _PSquareQuantile:
+    """Estimator kuantil-tunggal P-square (constant memory; 5 marker)."""
+
+    def __init__(self, p: float) -> None:
+        self._p = p
+        self._init: list[float] = []
+        self._q: list[float] = []  # tinggi marker
+        self._n: list[float] = []  # posisi aktual
+        self._np: list[float] = []  # posisi diinginkan
+        self._dn: list[float] = []  # increment posisi diinginkan
+        self._ready = False
+
+    def add(self, x: float) -> None:
+        if not self._ready:
+            self._init.append(x)
+            if len(self._init) == 5:  # noqa: PLR2004 - 5 marker P-square
+                self._init.sort()
+                self._q = list(self._init)
+                self._n = [1.0, 2.0, 3.0, 4.0, 5.0]
+                p = self._p
+                self._np = [1.0, 1.0 + 2.0 * p, 1.0 + 4.0 * p, 3.0 + 2.0 * p, 5.0]
+                self._dn = [0.0, p / 2.0, p, (1.0 + p) / 2.0, 1.0]
+                self._ready = True
+            return
+        self._observe(x)
+
+    def _observe(self, x: float) -> None:
+        q = self._q
+        if x < q[0]:
+            q[0] = x
+            k = 0
+        elif x >= q[4]:
+            q[4] = x
+            k = 3
+        else:
+            k = 3
+            for i in range(1, 5):
+                if x < q[i]:
+                    k = i - 1
+                    break
+        for i in range(k + 1, 5):
+            self._n[i] += 1.0
+        for i in range(5):
+            self._np[i] += self._dn[i]
+        for i in range(1, 4):
+            self._adjust(i)
+
+    def _adjust(self, i: int) -> None:
+        d = self._np[i] - self._n[i]
+        gap_up = self._n[i + 1] - self._n[i]
+        gap_dn = self._n[i - 1] - self._n[i]
+        if (d >= 1.0 and gap_up > 1.0) or (d <= -1.0 and gap_dn < -1.0):
+            sign = 1.0 if d > 0 else -1.0
+            qp = self._parabolic(i, sign)
+            if self._q[i - 1] < qp < self._q[i + 1]:
+                self._q[i] = qp
+            else:
+                self._q[i] = self._linear(i, sign)
+            self._n[i] += sign
+
+    def _parabolic(self, i: int, d: float) -> float:
+        q, n = self._q, self._n
+        return q[i] + d / (n[i + 1] - n[i - 1]) * (
+            (n[i] - n[i - 1] + d) * (q[i + 1] - q[i]) / (n[i + 1] - n[i])
+            + (n[i + 1] - n[i] - d) * (q[i] - q[i - 1]) / (n[i] - n[i - 1])
+        )
+
+    def _linear(self, i: int, d: float) -> float:
+        j = i + int(d)
+        return self._q[i] + d * (self._q[j] - self._q[i]) / (self._n[j] - self._n[i])
+
+    def value(self) -> float:
+        if self._ready:
+            return self._q[2]
+        if not self._init:
+            return 0.0
+        s = sorted(self._init)
+        pos = self._p * (len(s) - 1)
+        lo = int(pos)
+        frac = pos - lo
+        if lo + 1 < len(s):
+            return s[lo] + frac * (s[lo + 1] - s[lo])
+        return s[lo]
+
+
+class _StreamStats:
+    """Statistik streaming: count/min/max/mean eksak + kuantil P-square."""
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._sum = _ZERO
+        self._min: Decimal | None = None
+        self._max: Decimal | None = None
+        self._q = {p: _PSquareQuantile(p) for p in _SIZING_QUANTILES}
+
+    def add(self, value: Decimal) -> None:
+        self._count += 1
+        self._sum += value
+        if self._min is None or value < self._min:
+            self._min = value
+        if self._max is None or value > self._max:
+            self._max = value
+        xf = float(value)
+        for est in self._q.values():
+            est.add(xf)
+
+    def summary(self) -> SizingStat:
+        if self._count == 0:
+            return SizingStat()
+        mean = self._sum / Decimal(self._count)
+        return SizingStat(
+            count=self._count,
+            minimum=self._min if self._min is not None else _ZERO,
+            p25=Decimal(str(self._q[0.25].value())),
+            median=Decimal(str(self._q[0.5].value())),
+            mean=mean,
+            p75=Decimal(str(self._q[0.75].value())),
+            maximum=self._max if self._max is not None else _ZERO,
+        )
+
+
 # ----- replay inputs & config -----
 
 
@@ -317,6 +476,10 @@ class RoundObservation:
     entry_reasons: dict[str, int] = field(default_factory=_new_entry_reasons)
     # Fill-failure diagnostics (Task G3): klasifikasi sebab NO_FILL per EnterOrder.
     fill_failures: dict[str, int] = field(default_factory=_new_fill_failures)
+    # Sizing diagnostics (Task G4): cap binding + klasifikasi + sampel per EnterOrder.
+    sizing_binding: dict[str, int] = field(default_factory=_new_sizing_binding)
+    sizing_class: dict[str, int] = field(default_factory=_new_sizing_class)
+    sizing_samples: tuple[SizingDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +505,15 @@ class ReplaySummary:
     entry_reason_counts: dict[str, int] = field(default_factory=_new_entry_reasons)
     # Fill-failure diagnostics (Task G3): klasifikasi sebab NO_FILL per EnterOrder.
     fill_failure_counts: dict[str, int] = field(default_factory=_new_fill_failures)
+    # Sizing diagnostics (Task G4): cap binding, klasifikasi min-order, distribusi.
+    sizing_binding_counts: dict[str, int] = field(default_factory=_new_sizing_binding)
+    sizing_class_counts: dict[str, int] = field(default_factory=_new_sizing_class)
+    sizing_raw_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_rounded_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_kelly_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_notional_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_bankroll_stats: SizingStat = field(default_factory=SizingStat)
+    sizing_depth_stats: SizingStat = field(default_factory=SizingStat)
 
     @property
     def signal_no_fill_rate(self) -> Decimal:
@@ -365,6 +537,14 @@ class _ObsTally:
         self.fok_rejected_empty_book = 0
         self.entry_reasons: dict[str, int] = _new_entry_reasons()
         self.fill_failures: dict[str, int] = _new_fill_failures()
+        self.sizing_binding: dict[str, int] = _new_sizing_binding()
+        self.sizing_class: dict[str, int] = _new_sizing_class()
+        self.raw_stats = _StreamStats()
+        self.rounded_stats = _StreamStats()
+        self.kelly_stats = _StreamStats()
+        self.notional_stats = _StreamStats()
+        self.bankroll_stats = _StreamStats()
+        self.depth_stats = _StreamStats()
 
     def add(self, obs: RoundObservation) -> None:
         """Roll-up satu observasi ronde."""
@@ -381,6 +561,17 @@ class _ObsTally:
             self.entry_reasons[key] = self.entry_reasons.get(key, 0) + count
         for key, count in obs.fill_failures.items():
             self.fill_failures[key] = self.fill_failures.get(key, 0) + count
+        for key, count in obs.sizing_binding.items():
+            self.sizing_binding[key] = self.sizing_binding.get(key, 0) + count
+        for key, count in obs.sizing_class.items():
+            self.sizing_class[key] = self.sizing_class.get(key, 0) + count
+        for sd in obs.sizing_samples:
+            self.raw_stats.add(sd.raw_size)
+            self.rounded_stats.add(sd.rounded_size)
+            self.kelly_stats.add(sd.size_kelly)
+            self.notional_stats.add(sd.cap_notional)
+            self.bankroll_stats.add(sd.cap_bankroll)
+            self.depth_stats.add(sd.cap_depth)
 
     def as_kwargs(self) -> dict[str, int]:
         """Field observability int untuk konstruksi :class:`ReplaySummary`."""
@@ -400,6 +591,14 @@ class _ObsTally:
     def fill_failure_counts(self) -> dict[str, int]:
         """Hitungan sebab gagal-fill (Task G3) sebagai dict baru (stabil)."""
         return dict(self.fill_failures)
+
+    def sizing_binding_counts(self) -> dict[str, int]:
+        """Hitungan cap binding (Task G4) sebagai dict baru (stabil)."""
+        return dict(self.sizing_binding)
+
+    def sizing_class_counts(self) -> dict[str, int]:
+        """Hitungan klasifikasi min-order (Task G4) sebagai dict baru (stabil)."""
+        return dict(self.sizing_class)
 
 
 class _RoundLedger:
@@ -422,6 +621,10 @@ class _RoundLedger:
         self.fok_rejected_empty_book: int = 0
         # --- klasifikasi sebab gagal-fill (Task G3; observability murni) ---
         self.fill_failures: dict[str, int] = _new_fill_failures()
+        # --- sizing diagnostics (Task G4; observability murni, per ronde) ---
+        self.sizing_binding: dict[str, int] = _new_sizing_binding()
+        self.sizing_class: dict[str, int] = _new_sizing_class()
+        self.sizing_samples: list[SizingDiagnostic] = []
 
     @property
     def entered(self) -> bool:
@@ -564,6 +767,9 @@ class ReplayEngine:
             fok_rejected_empty_book=ledger.fok_rejected_empty_book,
             entry_reasons=entry_reasons,
             fill_failures=ledger.fill_failures,
+            sizing_binding=ledger.sizing_binding,
+            sizing_class=ledger.sizing_class,
+            sizing_samples=tuple(ledger.sizing_samples),
         )
 
     def run(
@@ -600,6 +806,14 @@ class ReplayEngine:
             diagnostics=tuple(diagnostics),
             entry_reason_counts=obs_tally.entry_counts(),
             fill_failure_counts=obs_tally.fill_failure_counts(),
+            sizing_binding_counts=obs_tally.sizing_binding_counts(),
+            sizing_class_counts=obs_tally.sizing_class_counts(),
+            sizing_raw_stats=obs_tally.raw_stats.summary(),
+            sizing_rounded_stats=obs_tally.rounded_stats.summary(),
+            sizing_kelly_stats=obs_tally.kelly_stats.summary(),
+            sizing_notional_stats=obs_tally.notional_stats.summary(),
+            sizing_bankroll_stats=obs_tally.bankroll_stats.summary(),
+            sizing_depth_stats=obs_tally.depth_stats.summary(),
             **obs_tally.as_kwargs(),
         )
 
@@ -651,6 +865,11 @@ class ReplayEngine:
         decision_book = mbook.for_outcome(leader)
         depth = sum((lvl.size for lvl in decision_book.asks), _ZERO)
         sized = size(signal, bankroll, depth, limits)
+        # G4: cermin observability sizing (read-only; tak mengubah `sized`/keputusan).
+        sd = diagnose_size(signal, bankroll, depth, limits)
+        ledger.sizing_samples.append(sd)
+        ledger.sizing_binding[sd.binding_label] = ledger.sizing_binding.get(sd.binding_label, 0) + 1
+        ledger.sizing_class[sd.classification] += 1
         if sized <= _ZERO:
             ledger.fill_failures[FILL_FAIL_REQUESTED_SIZE_ZERO] += 1  # G3
             return
@@ -938,6 +1157,14 @@ class RunAccumulator:
             diagnostics=tuple(self._diags),
             entry_reason_counts=self._obs.entry_counts(),
             fill_failure_counts=self._obs.fill_failure_counts(),
+            sizing_binding_counts=self._obs.sizing_binding_counts(),
+            sizing_class_counts=self._obs.sizing_class_counts(),
+            sizing_raw_stats=self._obs.raw_stats.summary(),
+            sizing_rounded_stats=self._obs.rounded_stats.summary(),
+            sizing_kelly_stats=self._obs.kelly_stats.summary(),
+            sizing_notional_stats=self._obs.notional_stats.summary(),
+            sizing_bankroll_stats=self._obs.bankroll_stats.summary(),
+            sizing_depth_stats=self._obs.depth_stats.summary(),
             **self._obs.as_kwargs(),
         )
 

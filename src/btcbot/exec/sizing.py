@@ -222,6 +222,118 @@ def size(
     return rounded
 
 
+# ----- sizing diagnostics (Task G4 — observability MURNI, read-only) -----
+#
+# Cermin :func:`size` TANPA mengubah perhitungan/return. Dipakai backtest report
+# untuk menjelaskan MENGAPA ``size()`` menghasilkan 0 (cap mana yang binding,
+# apakah raw/rounded di bawah ``min_order_size``).
+
+SIZING_RAW_BELOW_MIN = "RAW_BELOW_MIN"  # raw < min_order_size
+SIZING_ROUNDED_BELOW_MIN = "ROUNDED_BELOW_MIN"  # raw>=min tapi rounded<min (tick)
+SIZING_SUCCESS = "SUCCESS"  # rounded >= min_order_size (size() > 0)
+SIZING_CLASS_KEYS: tuple[str, ...] = (
+    SIZING_RAW_BELOW_MIN,
+    SIZING_ROUNDED_BELOW_MIN,
+    SIZING_SUCCESS,
+)
+
+# Label binding-cap untuk report (dipisah dari nilai enum agar judul ringkas).
+SIZING_BINDING_LABELS: dict[BindingCap, str] = {
+    BindingCap.KELLY: "KELLY",
+    BindingCap.NOTIONAL: "NOTIONAL",
+    BindingCap.BANKROLL_FRACTION: "BANKROLL",
+    BindingCap.DEPTH: "DEPTH",
+    BindingCap.NONE: "NONE",
+}
+SIZING_BINDING_KEYS: tuple[str, ...] = ("KELLY", "NOTIONAL", "BANKROLL", "DEPTH", "NONE")
+
+
+@dataclass(frozen=True, slots=True)
+class SizingDiagnostic:
+    """Snapshot read-only perhitungan sizing satu evaluasi ``size()`` (Task G4).
+
+    Semua nilai DIHITUNG ULANG dengan formula yang sama persis seperti
+    :func:`_capped_size`/:func:`size` (tanpa mengubahnya). ``binding_cap`` & ``raw_size``
+    diambil langsung dari :func:`_capped_size` (sumber kebenaran perilaku), sedangkan
+    cap individual di-derive untuk pelaporan distribusi.
+    """
+
+    binding_cap: BindingCap
+    binding_label: str
+    classification: str
+    edge: Decimal
+    ask: Decimal
+    bankroll: Decimal
+    depth_available: Decimal
+    size_kelly: Decimal
+    cap_notional: Decimal
+    cap_bankroll: Decimal
+    cap_depth: Decimal
+    raw_size: Decimal
+    rounded_size: Decimal
+    min_order_size: Decimal
+    tick_size: Decimal
+
+
+def diagnose_size(
+    signal: Signal,
+    bankroll: Decimal,
+    depth: Decimal,
+    limits: SizingLimits,
+) -> SizingDiagnostic:
+    """Cermin observability :func:`size` — TIDAK mengubah perilaku (Task G4).
+
+    Mengembalikan :class:`SizingDiagnostic` yang menjelaskan cap binding, nilai
+    tiap cap kandidat, ``raw``/``rounded`` size, dan klasifikasi sebab nol
+    (:data:`SIZING_RAW_BELOW_MIN`/:data:`SIZING_ROUNDED_BELOW_MIN`/:data:`SIZING_SUCCESS`).
+    """
+    edge = signal.net_edge
+    ask = signal.ask_win
+    p_win = signal.p_win
+    if ask > _ZERO:
+        kelly_raw = max(_ZERO, (p_win - (_ONE - p_win) * ask) / ask)
+        size_kelly = limits.kelly_fraction * kelly_raw * bankroll / ask
+        cap_notional = limits.max_notional_round / ask
+        cap_bankroll = (bankroll * limits.max_bankroll_fraction) / ask
+    else:
+        size_kelly = _ZERO
+        cap_notional = _ZERO
+        cap_bankroll = _ZERO
+    cap_depth = depth * limits.fill_safety
+    binding_cap, raw = _capped_size(
+        edge=edge,
+        p_win=p_win,
+        ask=ask,
+        bankroll=bankroll,
+        depth_available=depth,
+        limits=limits,
+    )
+    rounded = round_to_tick(raw, limits.tick_size)
+    if raw < limits.min_order_size:
+        classification = SIZING_RAW_BELOW_MIN
+    elif rounded < limits.min_order_size:
+        classification = SIZING_ROUNDED_BELOW_MIN
+    else:
+        classification = SIZING_SUCCESS
+    return SizingDiagnostic(
+        binding_cap=binding_cap,
+        binding_label=SIZING_BINDING_LABELS.get(binding_cap, "NONE"),
+        classification=classification,
+        edge=edge,
+        ask=ask,
+        bankroll=bankroll,
+        depth_available=depth,
+        size_kelly=size_kelly,
+        cap_notional=cap_notional,
+        cap_bankroll=cap_bankroll,
+        cap_depth=cap_depth,
+        raw_size=raw,
+        rounded_size=rounded,
+        min_order_size=limits.min_order_size,
+        tick_size=limits.tick_size,
+    )
+
+
 def active_bankroll(settings: Settings, paper_balance: Decimal | None = None) -> Decimal:
     """Tentukan bankroll aktif untuk sizing.
 
