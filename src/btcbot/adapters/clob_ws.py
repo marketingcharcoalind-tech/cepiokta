@@ -327,15 +327,30 @@ class HttpClobWS:
 
     async def stream_market(self, token_ids: list[str]) -> AsyncIterator[BookUpdate]:
         """Stream update orderbook dengan reconnect & deteksi stale."""
+        import structlog
+        log = structlog.get_logger()
         attempts = 0
         first = True
         backoff = self._backoff_initial
 
         while not self._closed:
             try:
+                log.info(
+                    "ws_connect_attempt",
+                    attempt=attempts,
+                    first=first,
+                    url=self._url,
+                    token_ids=token_ids,
+                )
                 conn = await self._connect(self._url)
             except (WSConnectionClosedError, OSError) as exc:
                 attempts += 1
+                log.warning(
+                    "ws_connect_failed",
+                    attempt=attempts,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
                 self._emit(EventType.DISCONNECTED, f"connect gagal: {exc}")
                 if self._gave_up(attempts):
                     return
@@ -343,10 +358,19 @@ class HttpClobWS:
                 backoff = self._next_backoff(backoff)
                 continue
 
-            self._emit(EventType.CONNECTED if first else EventType.RECONNECTED)
+            event_type = EventType.CONNECTED if first else EventType.RECONNECTED
+            log.info(
+                "ws_lifecycle",
+                event=str(event_type),
+                attempt=attempts,
+                token_ids=token_ids,
+                wall_time=self._clock.now().isoformat(),
+            )
+            self._emit(event_type)
             first = False
 
             try:
+                log.info("ws_subscribe", token_ids=token_ids)
                 await self._subscribe(conn, token_ids)
                 async for book in self._read_market(conn):
                     # Koneksi terbukti sehat: reset penghitung & backoff.
@@ -354,13 +378,20 @@ class HttpClobWS:
                     backoff = self._backoff_initial
                     yield book
             except (WSConnectionClosedError, OSError) as exc:
+                log.warning(
+                    "ws_disconnected",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
                 self._emit(EventType.DISCONNECTED, str(exc))
             finally:
                 await self._safe_close(conn)
 
             attempts += 1
             if self._gave_up(attempts):
+                log.info("ws_gave_up", total_attempts=attempts)
                 return
+            log.info("ws_reconnect_backoff", backoff=backoff, attempt=attempts)
             await self._sleep(backoff)
             backoff = self._next_backoff(backoff)
 
@@ -394,6 +425,9 @@ class HttpClobWS:
         meski data mengalir terus. Jika tak ada pesan > ``stale_sec`` → koneksi
         dianggap mati → keluar (memicu reconnect dengan backoff).
         """
+        import structlog
+        log = structlog.get_logger()
+        
         state = BookState()
         hb_task = asyncio.create_task(self._heartbeat(conn))
         try:
@@ -401,19 +435,65 @@ class HttpClobWS:
                 try:
                     raw = await asyncio.wait_for(conn.recv(), timeout=self._stale_sec)
                 except TimeoutError:
+                    log.warning(
+                        "ws_stale_timeout",
+                        stale_sec=self._stale_sec,
+                        wall_time=self._clock.now().isoformat(),
+                    )
                     self._emit(EventType.STALE, f"tidak ada pesan > {self._stale_sec}s")
                     return
                 try:
                     obj = json.loads(raw)
                 except (json.JSONDecodeError, ValueError):
                     # Frame non-JSON (mis. balasan "PONG"/"PING") → skip aman.
+                    log.debug("ws_non_json_frame", raw_prefix=raw[:50] if len(raw) > 50 else raw)
                     continue
+                
+                # Log raw frame BEFORE parsing
                 elements = obj if isinstance(obj, list) else [obj]
-                for elem in elements:
+                for i, elem in enumerate(elements):
                     if not isinstance(elem, dict):
                         continue
-                    for book in parse_ws_element(elem, state, self._clock):
-                        yield book
+                    event_type = elem.get("event_type")
+                    timestamp_raw = elem.get("timestamp")
+                    is_snapshot = "bids" in elem or "asks" in elem or event_type == "book"
+                    is_price_change = event_type == "price_change"
+                    asset_ids = []
+                    if is_snapshot and "asset_id" in elem:
+                        asset_ids.append(str(elem["asset_id"]))
+                    elif is_price_change:
+                        for pc_entry in elem.get("price_changes") or []:
+                            if isinstance(pc_entry, dict) and "asset_id" in pc_entry:
+                                asset_ids.append(str(pc_entry["asset_id"]))
+                    
+                    if is_snapshot or is_price_change:
+                        log.info(
+                            "ws_frame_received",
+                            element_idx=i,
+                            event_type=event_type,
+                            is_snapshot=is_snapshot,
+                            is_price_change=is_price_change,
+                            timestamp_raw=timestamp_raw,
+                            asset_ids=asset_ids,
+                            num_price_changes=len(elem.get("price_changes", [])) if is_price_change else 0,
+                        )
+                    
+                    # Parse
+                    books = parse_ws_element(elem, state, self._clock)
+                    
+                    # Log parser output
+                    if books:
+                        for book in books:
+                            log.info(
+                                "ws_parser_output",
+                                token_id=book.token_id,
+                                ts=book.ts.isoformat(),
+                                best_bid=str(book.bids[0].price) if book.bids else None,
+                                best_ask=str(book.asks[0].price) if book.asks else None,
+                                bid_depth=str(book.bids[0].size) if book.bids else "0",
+                                ask_depth=str(book.asks[0].size) if book.asks else "0",
+                            )
+                            yield book
         finally:
             hb_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

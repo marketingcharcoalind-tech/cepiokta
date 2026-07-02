@@ -236,6 +236,20 @@ class Recorder:
                 now = self._clock.now()
                 latest[book.token_id] = book
                 last_book = book
+                
+                # Log received book before _should_persist
+                best_bid, best_ask = _best(book)
+                log.info(
+                    "recorder_book_received",
+                    round_no=round_no,
+                    token_id=book.token_id,
+                    ts=book.ts.isoformat(),
+                    best_bid=str(best_bid) if best_bid is not None else None,
+                    best_ask=str(best_ask) if best_ask is not None else None,
+                    bid_depth=str(book.bids[0].size) if book.bids else "0",
+                    ask_depth=str(book.asks[0].size) if book.asks else "0",
+                )
+                
                 if self._should_persist(book, window_end, now):
                     await self._persist_book(round_no, book, now)
                     persisted_latest[book.token_id] = True
@@ -295,22 +309,90 @@ class Recorder:
         now: datetime,
     ) -> bool:
         """Putuskan apakah ``book`` perlu ditulis (aturan retensi)."""
+        import structlog
+        log = structlog.get_logger()
+        
         if self._persist_mode == "all":
+            log.info(
+                "persist_decision",
+                token_id=book.token_id,
+                ts=book.ts.isoformat(),
+                decision=True,
+                reason="persist_mode_all",
+            )
             return True
+        
         last = self._last_persist.get(book.token_id)
         if last is None:
+            log.info(
+                "persist_decision",
+                token_id=book.token_id,
+                ts=book.ts.isoformat(),
+                decision=True,
+                reason="first_snapshot",
+            )
             return True  # snapshot pertama token ini di ronde
+        
         best_bid, best_ask = _best(book)
         last_bid, last_ask, last_ms = last
+        
         if best_bid != last_bid or best_ask != last_ask:
+            log.info(
+                "persist_decision",
+                token_id=book.token_id,
+                ts=book.ts.isoformat(),
+                decision=True,
+                reason="price_changed",
+                last_bid=str(last_bid) if last_bid is not None else None,
+                last_ask=str(last_ask) if last_ask is not None else None,
+                best_bid=str(best_bid) if best_bid is not None else None,
+                best_ask=str(best_ask) if best_ask is not None else None,
+            )
             return True  # perubahan harga = sinyal penting, jangan di-drop
+        
         if window_end is not None and (window_end - now).total_seconds() <= self._finegrain_sec:
+            log.info(
+                "persist_decision",
+                token_id=book.token_id,
+                ts=book.ts.isoformat(),
+                decision=True,
+                reason="finegrain_mode",
+                seconds_left=(window_end - now).total_seconds(),
+            )
             return True  # fine-grain akhir-window → resolusi penuh
+        
         now_ms = int(now.timestamp() * 1000)
-        return (now_ms - last_ms) >= self._sample_ms  # throttle
+        throttle_elapsed = (now_ms - last_ms) >= self._sample_ms
+        
+        log.info(
+            "persist_decision",
+            token_id=book.token_id,
+            ts=book.ts.isoformat(),
+            decision=throttle_elapsed,
+            reason="throttle_expired" if throttle_elapsed else "throttle_active",
+            elapsed_ms=now_ms - last_ms,
+            sample_ms=self._sample_ms,
+        )
+        
+        return throttle_elapsed  # throttle
 
     async def _persist_book(self, round_no: int, book: OrderBook, now: datetime) -> None:
         """Tulis snapshot & perbarui state retensi token."""
-        await self._store.insert_book_snapshot(round_no, book, mode=self._mode)
+        import structlog
+        log = structlog.get_logger()
+        
         best_bid, best_ask = _best(book)
+        log.info(
+            "persist_book",
+            round_no=round_no,
+            token_id=book.token_id,
+            ts=book.ts.isoformat(),
+            best_bid=str(best_bid) if best_bid is not None else None,
+            best_ask=str(best_ask) if best_ask is not None else None,
+            bid_depth=str(book.bids[0].size) if book.bids else "0",
+            ask_depth=str(book.asks[0].size) if book.asks else "0",
+            mode=self._mode,
+        )
+        
+        await self._store.insert_book_snapshot(round_no, book, mode=self._mode)
         self._last_persist[book.token_id] = (best_bid, best_ask, int(now.timestamp() * 1000))
