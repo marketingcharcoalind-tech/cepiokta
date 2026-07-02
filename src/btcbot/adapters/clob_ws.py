@@ -361,7 +361,7 @@ class HttpClobWS:
             event_type = EventType.CONNECTED if first else EventType.RECONNECTED
             log.info(
                 "ws_lifecycle",
-                event=str(event_type),
+                lifecycle_event=str(event_type),
                 attempt=attempts,
                 token_ids=token_ids,
                 wall_time=self._clock.now().isoformat(),

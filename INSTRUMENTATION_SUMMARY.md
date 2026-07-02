@@ -19,7 +19,7 @@ Added **pure observability logging** to trace the complete lifecycle of OrderBoo
 ### 1. `src/btcbot/adapters/clob_ws.py`
 
 #### Added to `HttpClobWS.stream_market()`:
-- **Connection lifecycle logging**: `ws_lifecycle` events for CONNECTED, RECONNECTED, DISCONNECTED
+- **Connection lifecycle logging**: `ws_lifecycle` events for CONNECTED, RECONNECTED, DISCONNECTED (field: `lifecycle_event`)
 - **Connection failure logging**: `ws_connect_failed` with attempt number and error details
 - **Subscription logging**: `ws_subscribe` with token_ids
 - **Reconnect backoff logging**: `ws_reconnect_backoff` with backoff duration and attempt

@@ -61,7 +61,7 @@ persist_book: [same values]  <-- DUPLICATE INSERT
 ## Log Events to Look For
 
 ### Connection Events
-- `ws_lifecycle`: CONNECTED, RECONNECTED, DISCONNECTED
+- `ws_lifecycle`: CONNECTED, RECONNECTED, DISCONNECTED (field: `lifecycle_event`)
 - `ws_stale_timeout`: No messages for 30+ seconds
 - `ws_reconnect_backoff`: Waiting before retry
 
@@ -104,7 +104,7 @@ persist_book: [same values]  <-- DUPLICATE INSERT
 ## Expected Timeline
 
 ```
-12:34:50  CONNECTED                          ← Initial connection
+12:34:50  ws_lifecycle: lifecycle_event=CONNECTED  ← Initial connection
 12:34:51  ws_subscribe: [UP, DOWN]
 12:34:52  ws_frame_received: snapshot        ← Initial snapshot
 12:34:52  persist_decision: first_snapshot   ← Makes sense
@@ -114,7 +114,7 @@ persist_book: [same values]  <-- DUPLICATE INSERT
 
 12:35:30  ws_stale_timeout                   ← No activity
 12:35:30  DISCONNECTED
-12:35:31  RECONNECTED                        ← NEW CONNECTION
+12:35:31  ws_lifecycle: lifecycle_event=RECONNECTED  ← NEW CONNECTION
 12:35:31  ws_subscribe: [UP, DOWN]           ← Re-subscribe
 12:35:32  ws_frame_received: snapshot        ← Server replays
 12:35:32  persist_decision: first_snapshot   ← BUG! New BookState thinks first

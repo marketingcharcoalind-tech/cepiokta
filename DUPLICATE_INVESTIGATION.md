@@ -44,7 +44,7 @@ Database contains duplicate rows with:
 ```python
 log.info(
     "ws_lifecycle",
-    event="CONNECTED" | "RECONNECTED",
+    lifecycle_event="CONNECTED" | "RECONNECTED",
     attempt=attempts,
     token_ids=token_ids,
     wall_time=clock.now().isoformat(),
@@ -335,7 +335,7 @@ For the chosen duplicate, answer these questions using log evidence:
 
 **Timeline**:
 ```
-12:34:50  ws_lifecycle: CONNECTED, attempt=0
+12:34:50  ws_lifecycle: lifecycle_event=CONNECTED, attempt=0
 12:34:51  ws_subscribe: token_ids=[UP, DOWN]
 12:34:52  ws_frame_received: is_snapshot=true, token_id=UP, timestamp=12:34:52
 12:34:52  ws_parser_output: token_id=UP, ts=12:34:52, bid=0.52
@@ -345,7 +345,7 @@ For the chosen duplicate, answer these questions using log evidence:
 ...
 12:35:30  ws_stale_timeout: stale_sec=30  ← quiet market
 12:35:30  ws_disconnected
-12:35:31  ws_lifecycle: RECONNECTED, attempt=1  ← RECONNECT
+12:35:31  ws_lifecycle: lifecycle_event=RECONNECTED, attempt=1  ← RECONNECT
 12:35:31  ws_subscribe: token_ids=[UP, DOWN]  ← RE-SUBSCRIBE
 12:35:32  ws_frame_received: is_snapshot=true, token_id=UP, timestamp=12:34:52  ← SAME TS!
 12:35:32  ws_parser_output: token_id=UP, ts=12:34:52, bid=0.52  ← IDENTICAL BOOK
