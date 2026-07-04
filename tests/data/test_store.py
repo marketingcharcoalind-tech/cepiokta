@@ -147,7 +147,7 @@ class TestRounds:
         # Verifikasi resolusi tersimpan
         res = await store.get_resolution(48247)
         assert res is not None
-        assert res.outcome is Outcome.UP
+        assert res.resolved_outcome is Outcome.UP
         assert res.settlement_price == Decimal("64252.00")
         assert res.resolution_source == "gamma"
         got = await store.get_round(48247)
@@ -159,7 +159,7 @@ class TestRounds:
         # Verifikasi resolusi TIDAK hilang
         res2 = await store.get_resolution(48247)
         assert res2 is not None
-        assert res2.outcome is Outcome.UP
+        assert res2.resolved_outcome is Outcome.UP
         assert res2.settlement_price == Decimal("64252.00")
         assert res2.resolution_source == "gamma"
         got2 = await store.get_round(48247)

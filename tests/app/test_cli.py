@@ -20,7 +20,7 @@ from btcbot.domain.models import MarketStatus, Outcome, RoundMeta, RoundStatus
 
 WS_T = datetime(2026, 6, 25, 10, 0, tzinfo=UTC)
 WE_T = datetime(2026, 6, 25, 10, 5, tzinfo=UTC)
-ROUND_NO = int(WS_T.timestamp())  # round_no diturunkan dari epoch window start
+ROUND_NO = int(WE_T.timestamp())  # window END epoch (selaras Fix 2b & market.round_no_for)
 
 
 def _meta(market_no: int) -> RoundMeta:
