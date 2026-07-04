@@ -272,14 +272,33 @@ class Store:
     # ----- rounds -----
 
     async def upsert_round(self, rnd: Round) -> None:
-        """Sisipkan/replace satu ronde (idempotent pada ``round_no``)."""
+        """Sisipkan/upsert satu ronde (idempotent pada round_no).
+
+        Mempertahankan resolusi: bila ronde sudah 'resolved', status & resolved_outcome
+        TIDAK ditimpa, dan settlement_price/resolution_source tidak disentuh (diisi hanya
+        via set_resolution). Mencegah record-ulang menghapus ground truth.
+        """
         await self._conn.execute(
             """
-            INSERT OR REPLACE INTO rounds (
+            INSERT INTO rounds (
                 condition_id, round_no, token_up, token_down, window_start,
                 window_end, start_price, tick_size, min_order_size, status,
                 resolved_outcome
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(round_no) DO UPDATE SET
+                condition_id   = excluded.condition_id,
+                token_up       = excluded.token_up,
+                token_down     = excluded.token_down,
+                window_start   = excluded.window_start,
+                window_end     = excluded.window_end,
+                start_price    = excluded.start_price,
+                tick_size      = excluded.tick_size,
+                min_order_size = excluded.min_order_size,
+                status = CASE 
+                    WHEN rounds.status = 'resolved' THEN rounds.status 
+                    ELSE excluded.status 
+                END,
+                resolved_outcome = COALESCE(rounds.resolved_outcome, excluded.resolved_outcome)
             """,
             (
                 rnd.condition_id,
