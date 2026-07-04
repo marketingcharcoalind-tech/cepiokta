@@ -264,41 +264,41 @@ class TestShouldPersist:
     async def test_first_always_persists(self, store: Store) -> None:
         clock = SimClock(WS)
         rec = _rec(store, HttpClobWS("wss://x"), clock)
-        assert rec._should_persist(_book(), None, clock.now()) is True
+        assert rec._should_persist(1, _book(), None, clock.now()) is True
 
     async def test_same_best_within_sample_throttled(self, store: Store) -> None:
         clock = SimClock(WS)
         rec = _rec(store, HttpClobWS("wss://x"), clock)
         rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
         # depth jitter (best sama), waktu sama → throttle.
-        assert rec._should_persist(_book(bid_size="101"), None, WS) is False
+        assert rec._should_persist(1, _book(bid_size="101"), None, WS) is False
 
     async def test_same_best_after_sample_persists(self, store: Store) -> None:
         clock = SimClock(WS)
         rec = _rec(store, HttpClobWS("wss://x"), clock)
         rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
         later = WS + timedelta(milliseconds=1100)
-        assert rec._should_persist(_book(bid_size="101"), None, later) is True
+        assert rec._should_persist(1, _book(bid_size="101"), None, later) is True
 
     async def test_best_change_persists_immediately(self, store: Store) -> None:
         clock = SimClock(WS)
         rec = _rec(store, HttpClobWS("wss://x"), clock)
         rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
         # best berubah (0.52→0.53) walau waktu sama → langsung tulis.
-        assert rec._should_persist(_book(bid="0.53"), None, WS) is True
+        assert rec._should_persist(1, _book(bid="0.53"), None, WS) is True
 
     async def test_finegrain_window_bypasses_throttle(self, store: Store) -> None:
         clock = SimClock(WS)
         rec = _rec(store, HttpClobWS("wss://x"), clock, book_finegrain_sec=45)
         rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
         window_end = WS + timedelta(seconds=30)  # time_left 30 <= 45 → fine-grain
-        assert rec._should_persist(_book(bid_size="101"), window_end, WS) is True
+        assert rec._should_persist(1, _book(bid_size="101"), window_end, WS) is True
 
     async def test_mode_all_always_persists(self, store: Store) -> None:
         clock = SimClock(WS)
         rec = _rec(store, HttpClobWS("wss://x"), clock, book_persist_mode="all")
         rec._last_persist["111"] = (Decimal("0.52"), Decimal("0.55"), int(WS.timestamp() * 1000))
-        assert rec._should_persist(_book(bid_size="101"), None, WS) is True
+        assert rec._should_persist(1, _book(bid_size="101"), None, WS) is True
 
 
 class TestRetentionConsume:

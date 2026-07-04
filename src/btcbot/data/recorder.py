@@ -250,7 +250,7 @@ class Recorder:
                     ask_depth=str(book.asks[0].size) if book.asks else "0",
                 )
                 
-                if self._should_persist(book, window_end, now):
+                if self._should_persist(round_no, book, window_end, now):
                     await self._persist_book(round_no, book, now)
                     persisted_latest[book.token_id] = True
                     written += 1
@@ -304,6 +304,7 @@ class Recorder:
 
     def _should_persist(
         self,
+        round_no: int,
         book: OrderBook,
         window_end: datetime | None,
         now: datetime,
@@ -315,6 +316,7 @@ class Recorder:
         if self._persist_mode == "all":
             log.info(
                 "persist_decision",
+                round_no=round_no,
                 token_id=book.token_id,
                 ts=book.ts.isoformat(),
                 decision=True,
@@ -326,6 +328,7 @@ class Recorder:
         if last is None:
             log.info(
                 "persist_decision",
+                round_no=round_no,
                 token_id=book.token_id,
                 ts=book.ts.isoformat(),
                 decision=True,
@@ -339,6 +342,7 @@ class Recorder:
         if best_bid != last_bid or best_ask != last_ask:
             log.info(
                 "persist_decision",
+                round_no=round_no,
                 token_id=book.token_id,
                 ts=book.ts.isoformat(),
                 decision=True,
@@ -353,6 +357,7 @@ class Recorder:
         if window_end is not None and (window_end - now).total_seconds() <= self._finegrain_sec:
             log.info(
                 "persist_decision",
+                round_no=round_no,
                 token_id=book.token_id,
                 ts=book.ts.isoformat(),
                 decision=True,
@@ -366,6 +371,7 @@ class Recorder:
         
         log.info(
             "persist_decision",
+            round_no=round_no,
             token_id=book.token_id,
             ts=book.ts.isoformat(),
             decision=throttle_elapsed,
