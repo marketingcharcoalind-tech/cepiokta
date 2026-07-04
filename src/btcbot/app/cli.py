@@ -117,7 +117,7 @@ async def run_readonly(  # noqa: PLR0913
             processed += 1
             continue
 
-        round_no = int(meta.start_time.timestamp())
+        round_no = int(meta.end_time.timestamp())  # window_end epoch (selaras market.round_no_for & slug)
         rnd = round_from_meta(meta, round_no=round_no, start_price=tick.price)
         await recorder.record_round(rnd)
 

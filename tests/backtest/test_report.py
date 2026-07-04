@@ -272,3 +272,47 @@ class TestAblation:
         rounds = [(make_round(Outcome.UP), winning_ticks())]
         text = format_ablation(ablation(rounds, make_config()))
         assert "ABLATION" in text
+
+
+class TestResolveDelta:
+    """FIX 3: _resolve_delta with 'auto' vol-scaling (tidak lagi diam-diam 0)."""
+
+    def test_auto_uses_vol_scaling(self) -> None:
+        from btcbot.backtest.report import _resolve_delta
+        from btcbot.config.settings import get_settings
+
+        settings = get_settings()
+        # auto → vol * sqrt(T_ENTRY_SEC)
+        result = _resolve_delta(settings, "auto")
+        expected = settings.backtest_vol_per_sqrt_sec * Decimal(
+            str((float(settings.t_entry_sec)) ** 0.5)
+        )
+        assert result > Decimal("0"), "auto must NOT be 0 (bug lama)"
+        assert abs(result - expected) < Decimal("0.001"), f"expected ~{expected}, got {result}"
+
+    def test_explicit_value_preserved(self) -> None:
+        from btcbot.backtest.report import _resolve_delta
+        from btcbot.config.settings import get_settings
+
+        settings = get_settings()
+        result = _resolve_delta(settings, "0.05")
+        assert result == Decimal("0.05")
+
+    def test_invalid_fallback_to_auto(self) -> None:
+        from btcbot.backtest.report import _resolve_delta
+        from btcbot.config.settings import get_settings
+
+        settings = get_settings()
+        # Invalid string → fallback to auto (bukan 0)
+        result = _resolve_delta(settings, "invalid")
+        assert result > Decimal("0"), "invalid must fallback to auto (not 0)"
+
+    def test_none_uses_settings_default(self) -> None:
+        from btcbot.backtest.report import _resolve_delta
+        from btcbot.config.settings import get_settings
+
+        settings = get_settings()
+        result = _resolve_delta(settings, None)
+        # Depends on settings.delta_threshold; if "auto", should be > 0
+        if isinstance(settings.delta_threshold, str) and settings.delta_threshold.lower() == "auto":
+            assert result > Decimal("0")

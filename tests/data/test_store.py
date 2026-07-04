@@ -135,6 +135,38 @@ class TestRounds:
         assert got.status is RoundStatus.RESOLVED
         assert got.resolved_outcome is Outcome.UP
 
+    async def test_upsert_preserves_resolution_on_rerecord(self, store: Store) -> None:
+        """FIX 2a: upsert dengan ON CONFLICT mempertahankan resolusi (tidak timpa)."""
+        # Record ronde pertama kali
+        await store.upsert_round(_round())
+        # Set resolusi
+        await store.set_resolution(
+            48247, Outcome.UP, settlement_price=Decimal("64252.00"), resolution_source="gamma"
+        )
+        await store.update_round_status(48247, RoundStatus.RESOLVED, Outcome.UP)
+        # Verifikasi resolusi tersimpan
+        res = await store.get_resolution(48247)
+        assert res is not None
+        assert res.outcome is Outcome.UP
+        assert res.settlement_price == Decimal("64252.00")
+        assert res.resolution_source == "gamma"
+        got = await store.get_round(48247)
+        assert got is not None
+        assert got.status is RoundStatus.RESOLVED
+        assert got.resolved_outcome is Outcome.UP
+        # Record ULANG ronde yang sama (misal: restart recorder)
+        await store.upsert_round(_round(status=RoundStatus.ACTIVE))
+        # Verifikasi resolusi TIDAK hilang
+        res2 = await store.get_resolution(48247)
+        assert res2 is not None
+        assert res2.outcome is Outcome.UP
+        assert res2.settlement_price == Decimal("64252.00")
+        assert res2.resolution_source == "gamma"
+        got2 = await store.get_round(48247)
+        assert got2 is not None
+        assert got2.status is RoundStatus.RESOLVED  # status tetap resolved
+        assert got2.resolved_outcome is Outcome.UP  # outcome tetap UP
+
 
 class TestBookSnapshots:
     async def test_insert_and_get(self, store: Store) -> None:
