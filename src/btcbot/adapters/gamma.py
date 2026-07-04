@@ -54,12 +54,12 @@ _HTTP_SERVER_ERROR = 500
 SLUG_RE = re.compile(r"^(?P<asset>[a-z]+)-updown-(?P<tf>5m|15m)-(?P<epoch>\d+)$")
 
 TIMEFRAME_SECONDS: dict[str, int] = {"5m": 300, "15m": 900}
-# Jendela end_date untuk discovery. Market di-listing ~24h ahead dengan endDate berjam-jam
-# di depan (verified: market aktif 8h+ ke depan). Butuh buffer lebar agar query end_date
-# window menangkap market yang sudah di-listing.
-DISCOVERY_BUFFER_SECONDS: dict[str, int] = {
-    "5m": 12 * 60 * 60,   # 12 jam (cukup menampung market listed ahead + margin)
-    "15m": 12 * 60 * 60,  # 12 jam
+# Jendela pencarian untuk discovery. Strategi: by-slug untuk N window ke depan (bukan
+# end_date range lebar yang kena 500-cap). Jumlah window kecil = API call efisien. Jika
+# market sparse, bot retry discovery di tick berikutnya (normal behavior).
+DISCOVERY_NUM_WINDOWS: dict[str, int] = {
+    "5m": 6,   # 6 × 5min = 30 menit ke depan (6 API calls)
+    "15m": 4,  # 4 × 15min = 60 menit ke depan (4 API calls)
 }
 
 DEFAULT_ASSET = "btc"
@@ -386,28 +386,32 @@ class HttpGammaClient:
         self._sleep = sleep
 
     async def discover_rounds(self) -> list[RoundMeta]:
-        """Kumpulkan ronde up/down (asset/timeframe) via jendela end_date."""
+        """Kumpulkan ronde up/down via by-slug (safe from 500-cap, efficient).
+        
+        Strategi: query by-slug untuk N window ke depan dari now (aligned). Slug query
+        terbukti reliable (verified VPS). Jumlah window kecil (6-4) = efficient API usage.
+        Jika market sparse, bot retry discovery di tick berikutnya (normal behavior).
+        """
         now = self._clock.now()
-        buffer_sec = DISCOVERY_BUFFER_SECONDS[self._timeframe]
-        base_params = {
-            "closed": "false",
-            "active": "true",
-            "end_date_min": _iso_z(now),
-            "end_date_max": _iso_z(now + timedelta(seconds=buffer_sec)),
-            "limit": str(self._page_limit),
-        }
+        num_windows = DISCOVERY_NUM_WINDOWS[self._timeframe]
+        tf_sec = TIMEFRAME_SECONDS[self._timeframe]
+        
+        # Epoch start = aligned ke timeframe (slug epoch = window_start)
+        now_ts = int(now.timestamp())
+        start_epoch = (now_ts // tf_sec) * tf_sec
+        
         rounds: list[RoundMeta] = []
-        for page in range(self._max_pages):
-            params = dict(base_params)
-            params["offset"] = str(page * self._page_limit)
-            batch = await self._get_markets(params)
-            if not batch:
-                break
-            for raw in batch:
-                if isinstance(raw, dict) and is_updown_market(raw, self._asset, self._timeframe):
+        for i in range(num_windows):
+            epoch = start_epoch + (i * tf_sec)
+            slug = f"{self._asset}-updown-{self._timeframe}-{epoch}"
+            
+            # Query by slug (single market per query, no cap risk)
+            batch = await self._get_markets({"slug": slug})
+            if batch and isinstance(batch[0], dict):
+                raw = batch[0]
+                if is_updown_market(raw, self._asset, self._timeframe):
                     rounds.append(parse_market(raw))
-            if len(batch) < self._page_limit:
-                break
+        
         rounds.sort(key=lambda r: r.start_time)
         return rounds
 

@@ -168,15 +168,26 @@ class TestParseMarket:
         data.pop("events", None)
         data.pop("endDate", None)
         meta = parse_market(data)
-        assert meta.end_time == datetime.fromtimestamp(1782478200, tz=UTC)
-        assert meta.start_time == datetime.fromtimestamp(1782478200 - 300, tz=UTC)
+        # Slug epoch (1782478200) = window_START; endDate should be epoch + 300
+        assert meta.end_time == datetime.fromtimestamp(1782478200 + 300, tz=UTC)  # 12:55
+        assert meta.start_time == datetime.fromtimestamp(1782478200, tz=UTC)  # 12:50 (slug epoch)
 
 
 class TestHttpGammaClient:
     @respx.mock
     async def test_discover_rounds_btc5m_only(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        async with HttpGammaClient(BASE_URL, asset="btc", timeframe="5m") as client:
+        # Use clock from fixture time to ensure aligned epochs match fixture slugs
+        clock = SimClock(datetime(2026, 6, 26, 12, 52, tzinfo=UTC))
+        # Mock by-slug queries (discovery queries 6 windows ahead from clock time)
+        # Aligned from 12:52 = 12:50, next 6 windows
+        for i in range(6):
+            epoch = 1782478200 + i*300
+            slug = f"btc-updown-5m-{epoch}"
+            market = _by_slug(BTC5M_SLUG) if epoch == 1782478200 else None
+            respx.get(f"{BASE_URL}/markets", params={"slug": slug}).mock(
+                return_value=httpx.Response(200, json=[market] if market else [])
+            )
+        async with HttpGammaClient(BASE_URL, clock=clock, asset="btc", timeframe="5m") as client:
             rounds = await client.discover_rounds()
         assert rounds, "harus ada ronde btc 5m"
         assert all(r.asset == "btc" and r.timeframe == "5m" for r in rounds)
@@ -185,36 +196,76 @@ class TestHttpGammaClient:
 
     @respx.mock
     async def test_discover_rounds_btc15m(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        async with HttpGammaClient(BASE_URL, asset="btc", timeframe="15m") as client:
+        # Use clock that aligns to BTC15M fixture epoch
+        clock = SimClock(datetime(2026, 6, 26, 12, 52, tzinfo=UTC))
+        # BTC15M epoch: 1782477900 (12:45), aligned from 12:52 with 15m = 12:45
+        # Next 4 windows: 12:45, 13:00, 13:15, 13:30
+        for i in range(4):
+            epoch = 1782477900 + i*900
+            slug = f"btc-updown-15m-{epoch}"
+            market = _by_slug(BTC15M_SLUG) if epoch == 1782477900 else None
+            respx.get(f"{BASE_URL}/markets", params={"slug": slug}).mock(
+                return_value=httpx.Response(200, json=[market] if market else [])
+            )
+        async with HttpGammaClient(BASE_URL, clock=clock, asset="btc", timeframe="15m") as client:
             rounds = await client.discover_rounds()
         assert all(r.timeframe == "15m" and r.asset == "btc" for r in rounds)
         assert BTC15M_SLUG in {r.slug for r in rounds}
 
     @respx.mock
     async def test_discover_rounds_eth15m(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        async with HttpGammaClient(BASE_URL, asset="eth", timeframe="15m") as client:
+        # Mock empty results (no eth markets in fixture)
+        clock = SimClock(datetime(2026, 6, 26, 12, 52, tzinfo=UTC))
+        for i in range(4):
+            epoch = 1782477900 + i*900
+            slug = f"eth-updown-15m-{epoch}"
+            respx.get(f"{BASE_URL}/markets", params={"slug": slug}).mock(
+                return_value=httpx.Response(200, json=[])
+            )
+        async with HttpGammaClient(BASE_URL, clock=clock, asset="eth", timeframe="15m") as client:
             rounds = await client.discover_rounds()
         assert all(r.asset == "eth" and r.timeframe == "15m" for r in rounds)
 
     @respx.mock
-    async def test_query_uses_end_date_window(self) -> None:
-        route = respx.get(f"{BASE_URL}/markets").mock(
-            return_value=httpx.Response(200, json=_markets())
-        )
+    async def test_query_uses_by_slug(self) -> None:
+        """Verify discovery uses by-slug queries (not end_date window)."""
+        # Mock the expected slug from aligned clock time
         clock = SimClock(datetime(2026, 6, 26, 12, 52, tzinfo=UTC))
+        # Aligned: 1782478200, next 6 windows
+        expected_slugs = [f"btc-updown-5m-{1782478200 + i*300}" for i in range(6)]
+        
+        routes = []
+        for slug in expected_slugs:
+            market = _by_slug(BTC5M_SLUG) if slug == BTC5M_SLUG else None
+            route = respx.get(f"{BASE_URL}/markets", params={"slug": slug}).mock(
+                return_value=httpx.Response(200, json=[market] if market else [])
+            )
+            routes.append(route)
+        
         async with HttpGammaClient(BASE_URL, clock=clock, timeframe="5m") as client:
             await client.discover_rounds()
-        params = route.calls[0].request.url.params
-        assert params.get("end_date_min") == "2026-06-26T12:52:00Z"
-        assert params.get("end_date_max") == "2026-06-26T13:04:00Z"  # +12 menit
-        assert params.get("closed") == "false"
+        
+        # Verify slug queries were made (not end_date queries)
+        assert all(route.called for route in routes), "All slug queries should be called"
+        # Verify NO end_date params
+        for route in routes:
+            params = route.calls[0].request.url.params
+            assert "end_date_min" not in params
+            assert "end_date_max" not in params
+            assert "slug" in params
 
     @respx.mock
     async def test_active_round_in_window(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        clock = SimClock(datetime(2026, 6, 26, 12, 52, tzinfo=UTC))  # ∈ [12:50, 12:55)
+        # Clock at 12:52 = in window [12:50, 12:55) → should find BTC5M_SLUG
+        clock = SimClock(datetime(2026, 6, 26, 12, 52, tzinfo=UTC))
+        # Mock all 6 slug queries
+        for i in range(6):
+            slug = f"btc-updown-5m-{1782478200 + i*300}"
+            market = _by_slug(BTC5M_SLUG) if slug == BTC5M_SLUG else None
+            respx.get(f"{BASE_URL}/markets", params={"slug": slug}).mock(
+                return_value=httpx.Response(200, json=[market] if market else [])
+            )
+        
         async with HttpGammaClient(BASE_URL, clock=clock, timeframe="5m") as client:
             active = await client.discover_active_round()
         assert active.slug == BTC5M_SLUG
@@ -222,8 +273,19 @@ class TestHttpGammaClient:
 
     @respx.mock
     async def test_active_round_next_when_before_all(self) -> None:
-        respx.get(f"{BASE_URL}/markets").mock(return_value=httpx.Response(200, json=_markets()))
-        clock = SimClock(datetime(2026, 6, 26, 12, 30, tzinfo=UTC))  # sebelum semua window
+        # Clock at 12:30 (before 12:50 window) → aligned to 12:30, next 6 windows won't include 12:50
+        # But 12:50 window (BTC5M_SLUG) IS in the next 6 windows from 12:30
+        clock = SimClock(datetime(2026, 6, 26, 12, 30, tzinfo=UTC))
+        # Aligned: (1782477000 // 300) * 300 = 1782477000 (12:30)
+        # Next 6: 12:30, 12:35, 12:40, 12:45, 12:50, 12:55
+        for i in range(6):
+            epoch = 1782477000 + i*300
+            slug = f"btc-updown-5m-{epoch}"
+            market = _by_slug(BTC5M_SLUG) if epoch == 1782478200 else None
+            respx.get(f"{BASE_URL}/markets", params={"slug": slug}).mock(
+                return_value=httpx.Response(200, json=[market] if market else [])
+            )
+        
         async with HttpGammaClient(BASE_URL, clock=clock, timeframe="5m") as client:
             active = await client.discover_active_round()
         # terdekat akan datang = window paling awal (12:50)
@@ -231,6 +293,7 @@ class TestHttpGammaClient:
 
     @respx.mock
     async def test_no_rounds_raises(self) -> None:
+        # Mock all 6 slug queries to return non-updown market
         respx.get(f"{BASE_URL}/markets").mock(
             return_value=httpx.Response(200, json=[{"slug": "will-bitcoin-reach-200k-2026"}])
         )
@@ -240,19 +303,27 @@ class TestHttpGammaClient:
 
     @respx.mock
     async def test_rate_limit_backoff_then_success(self) -> None:
+        """Verify retry logic on 429 (rate limit) for individual slug queries."""
         calls = {"n": 0}
 
         def handler(_request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
+            # First call to ANY slug gets 429, then succeeds
             if calls["n"] == 1:
                 return httpx.Response(429)
-            return httpx.Response(200, json=_markets())
+            # Return empty list (no market) for subsequent calls
+            return httpx.Response(200, json=[])
 
+        # Mock all possible slug queries
         respx.get(f"{BASE_URL}/markets").mock(side_effect=handler)
+        
         async with HttpGammaClient(BASE_URL, sleep=_no_sleep, timeframe="5m") as client:
             rounds = await client.discover_rounds()
-        assert calls["n"] == 2
-        assert rounds
+        
+        # Should have: 1 fail (429) + 1 retry success + 5 more slug queries = 7 total
+        assert calls["n"] == 7, f"Expected 7 calls (1 fail + 1 retry + 5 slugs), got {calls['n']}"
+        # No rounds found (all empty responses)
+        assert rounds == []
 
     @respx.mock
     async def test_get_market_by_condition_id(self) -> None:
