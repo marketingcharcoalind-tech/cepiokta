@@ -538,12 +538,24 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _resolve_delta(settings: Settings, override: str | None) -> Decimal:
-    """Resolusi delta_threshold ke Decimal ('auto' → 0 = tanpa filter Δ)."""
+    """Resolusi delta_threshold ke Decimal.
+
+    'auto' → skala volatilitas: threshold = vol * sqrt(T_ENTRY_SEC), yaitu ~1σ gerak
+    harga sepanjang jendela entry (konsisten dgn sigma_left di SignalEngine). JANGAN
+    fallback ke 0 — itu mematikan filter Δ diam-diam (bug lama).
+    """
     raw = override if override is not None else settings.delta_threshold
+    if isinstance(raw, str) and raw.strip().lower() == "auto":
+        return settings.backtest_vol_per_sqrt_sec * Decimal(
+            str(math.sqrt(float(settings.t_entry_sec)))
+        )
     try:
         return Decimal(str(raw))
     except (InvalidOperation, ValueError):
-        return _ZERO
+        # tak terbaca → tetap ke auto (bukan 0) agar filter Δ tetap aktif
+        return settings.backtest_vol_per_sqrt_sec * Decimal(
+            str(math.sqrt(float(settings.t_entry_sec)))
+        )
 
 
 def filter_rounds(
