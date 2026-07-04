@@ -54,8 +54,13 @@ _HTTP_SERVER_ERROR = 500
 SLUG_RE = re.compile(r"^(?P<asset>[a-z]+)-updown-(?P<tf>5m|15m)-(?P<epoch>\d+)$")
 
 TIMEFRAME_SECONDS: dict[str, int] = {"5m": 300, "15m": 900}
-# Jendela end_date untuk discovery (cukup menampung ronde aktif + berikutnya).
-DISCOVERY_BUFFER_SECONDS: dict[str, int] = {"5m": 12 * 60, "15m": 30 * 60}
+# Jendela end_date untuk discovery. Market di-listing ~24h ahead dengan endDate berjam-jam
+# di depan (verified: market aktif 8h+ ke depan). Butuh buffer lebar agar query end_date
+# window menangkap market yang sudah di-listing.
+DISCOVERY_BUFFER_SECONDS: dict[str, int] = {
+    "5m": 12 * 60 * 60,   # 12 jam (cukup menampung market listed ahead + margin)
+    "15m": 12 * 60 * 60,  # 12 jam
+}
 
 DEFAULT_ASSET = "btc"
 DEFAULT_TIMEFRAME = "5m"
@@ -187,18 +192,22 @@ def is_updown_market(data: dict[str, Any], asset: str, timeframe: str) -> bool:
     return found_asset == asset.lower() and found_tf == timeframe
 
 
-def _window_end(data: dict[str, Any], epoch: int) -> datetime:
-    """``window_end`` = ``endDate`` bila ada, jika tidak dari slug epoch."""
+def _window_end(data: dict[str, Any], epoch: int, tf_seconds: int) -> datetime:
+    """``window_end`` = ``endDate`` bila ada, jika tidak slug epoch + timeframe.
+    
+    VERIFIED: slug epoch = window_START; endDate = epoch + timeframe_seconds.
+    """
     end_raw = data.get("endDate")
     if isinstance(end_raw, str) and end_raw:
         return _parse_utc(end_raw, "endDate")
-    return datetime.fromtimestamp(epoch, tz=UTC)
+    return datetime.fromtimestamp(epoch + tf_seconds, tz=UTC)
 
 
 def _window_start(data: dict[str, Any], epoch: int, tf_seconds: int) -> datetime:
-    """``window_start`` = ``eventStartTime``/``events[0].startTime`` else epoch-tf.
+    """``window_start`` = ``eventStartTime``/``events[0].startTime`` else slug epoch.
 
     JANGAN memakai ``startDate`` (tanggal listing).
+    VERIFIED: slug epoch = window_START (endDate = epoch + timeframe_seconds).
     """
     ev_start = data.get("eventStartTime")
     if not isinstance(ev_start, str) or not ev_start:
@@ -208,7 +217,7 @@ def _window_start(data: dict[str, Any], epoch: int, tf_seconds: int) -> datetime
             ev_start = candidate if isinstance(candidate, str) else None
     if isinstance(ev_start, str) and ev_start:
         return _parse_utc(ev_start, "eventStartTime")
-    return datetime.fromtimestamp(epoch - tf_seconds, tz=UTC)
+    return datetime.fromtimestamp(epoch, tz=UTC)
 
 
 def _parse_fee_schedule(raw: object) -> FeeSchedule | None:
@@ -258,7 +267,7 @@ def parse_market(data: dict[str, Any]) -> RoundMeta:
         token_id_up=str(token_ids[idx_up]),
         token_id_down=str(token_ids[idx_down]),
         start_time=_window_start(data, epoch, tf_seconds),
-        end_time=_window_end(data, epoch),
+        end_time=_window_end(data, epoch, tf_seconds),
         tick_size=_to_decimal(_require(data, "orderPriceMinTickSize"), "orderPriceMinTickSize"),
         min_order_size=_to_decimal(_require(data, "orderMinSize"), "orderMinSize"),
         status=status,
