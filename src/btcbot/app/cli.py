@@ -225,6 +225,7 @@ async def build_runtime(
         drain_seconds=settings.book_drain_seconds,
         poll_seconds=settings.book_poll_seconds,
         heartbeat_seconds=settings.recorder_heartbeat_seconds,
+        instrumentation_verbose=settings.instrumentation_verbose,
     )
     ws.set_event_sink(recorder.on_circuit_event)
     resolver = Resolver(store, gamma, clock, price_source=price_source)

@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./btcbot.db"
     log_level: str = "INFO"
     alert_webhook_url: str = ""
+    # Instrumentation verbosity (TaskRC): frame/persist debugging → huge logs.
+    # Default false = hanya event penting. True = semua frame/persist (debug soak).
+    instrumentation_verbose: bool = False
 
     # --- telegram (docs/12) ---
     telegram_enabled: bool = False

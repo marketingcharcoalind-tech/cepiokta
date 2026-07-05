@@ -59,6 +59,7 @@ class Recorder:
             settlement akhir) sebelum berhenti.
         poll_seconds: Interval bangun loop saat senyap (cek deadline/heartbeat).
         heartbeat_seconds: Interval log ``heartbeat`` (visibilitas anti-freeze).
+        instrumentation_verbose: TaskRC debug — log semua persist_decision (default False).
     """
 
     def __init__(  # noqa: PLR0913
@@ -75,6 +76,7 @@ class Recorder:
         drain_seconds: int = 3,
         poll_seconds: float = 1.0,
         heartbeat_seconds: int = 15,
+        instrumentation_verbose: bool = False,
     ) -> None:
         self._store = store
         self._ws = ws
@@ -87,6 +89,7 @@ class Recorder:
         self._drain_seconds = drain_seconds
         self._poll_seconds = poll_seconds
         self._heartbeat_seconds = heartbeat_seconds
+        self._instrumentation_verbose = instrumentation_verbose
         self._pending_gaps: list[CircuitEvent] = []
         # State retensi per token (untuk satu ronde): (best_bid, best_ask, ts_ms).
         self._last_persist: dict[str, tuple[Decimal | None, Decimal | None, int]] = {}
@@ -314,71 +317,76 @@ class Recorder:
         log = structlog.get_logger()
         
         if self._persist_mode == "all":
-            log.info(
-                "persist_decision",
-                round_no=round_no,
-                token_id=book.token_id,
-                ts=book.ts.isoformat(),
-                decision=True,
-                reason="persist_mode_all",
-            )
+            if self._instrumentation_verbose:
+                log.info(
+                    "persist_decision",
+                    round_no=round_no,
+                    token_id=book.token_id,
+                    ts=book.ts.isoformat(),
+                    decision=True,
+                    reason="persist_mode_all",
+                )
             return True
         
         last = self._last_persist.get(book.token_id)
         if last is None:
-            log.info(
-                "persist_decision",
-                round_no=round_no,
-                token_id=book.token_id,
-                ts=book.ts.isoformat(),
-                decision=True,
-                reason="first_snapshot",
-            )
+            if self._instrumentation_verbose:
+                log.info(
+                    "persist_decision",
+                    round_no=round_no,
+                    token_id=book.token_id,
+                    ts=book.ts.isoformat(),
+                    decision=True,
+                    reason="first_snapshot",
+                )
             return True  # snapshot pertama token ini di ronde
         
         best_bid, best_ask = _best(book)
         last_bid, last_ask, last_ms = last
         
         if best_bid != last_bid or best_ask != last_ask:
-            log.info(
-                "persist_decision",
-                round_no=round_no,
-                token_id=book.token_id,
-                ts=book.ts.isoformat(),
-                decision=True,
-                reason="price_changed",
-                last_bid=str(last_bid) if last_bid is not None else None,
-                last_ask=str(last_ask) if last_ask is not None else None,
-                best_bid=str(best_bid) if best_bid is not None else None,
-                best_ask=str(best_ask) if best_ask is not None else None,
-            )
+            if self._instrumentation_verbose:
+                log.info(
+                    "persist_decision",
+                    round_no=round_no,
+                    token_id=book.token_id,
+                    ts=book.ts.isoformat(),
+                    decision=True,
+                    reason="price_changed",
+                    last_bid=str(last_bid) if last_bid is not None else None,
+                    last_ask=str(last_ask) if last_ask is not None else None,
+                    best_bid=str(best_bid) if best_bid is not None else None,
+                    best_ask=str(best_ask) if best_ask is not None else None,
+                )
             return True  # perubahan harga = sinyal penting, jangan di-drop
         
         if window_end is not None and (window_end - now).total_seconds() <= self._finegrain_sec:
-            log.info(
-                "persist_decision",
-                round_no=round_no,
-                token_id=book.token_id,
-                ts=book.ts.isoformat(),
-                decision=True,
-                reason="finegrain_mode",
-                seconds_left=(window_end - now).total_seconds(),
-            )
+            if self._instrumentation_verbose:
+                log.info(
+                    "persist_decision",
+                    round_no=round_no,
+                    token_id=book.token_id,
+                    ts=book.ts.isoformat(),
+                    decision=True,
+                    reason="finegrain_mode",
+                    seconds_left=(window_end - now).total_seconds(),
+                )
             return True  # fine-grain akhir-window → resolusi penuh
         
         now_ms = int(now.timestamp() * 1000)
         throttle_elapsed = (now_ms - last_ms) >= self._sample_ms
         
-        log.info(
-            "persist_decision",
-            round_no=round_no,
-            token_id=book.token_id,
-            ts=book.ts.isoformat(),
-            decision=throttle_elapsed,
-            reason="throttle_expired" if throttle_elapsed else "throttle_active",
-            elapsed_ms=now_ms - last_ms,
-            sample_ms=self._sample_ms,
-        )
+        if self._instrumentation_verbose:
+            log.info(
+                "persist_decision",
+                round_no=round_no,
+                token_id=book.token_id,
+                ts=book.ts.isoformat(),
+                decision=throttle_elapsed,
+                reason="throttle_expired" if throttle_elapsed else "throttle_active",
+                elapsed_ms=now_ms - last_ms,
+                sample_ms=self._sample_ms,
+            )
         
         return throttle_elapsed  # throttle
 

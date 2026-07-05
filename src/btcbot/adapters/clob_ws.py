@@ -467,7 +467,7 @@ class HttpClobWS:
                                 asset_ids.append(str(pc_entry["asset_id"]))
                     
                     if is_snapshot or is_price_change:
-                        log.info(
+                        log.debug(
                             "ws_frame_received",
                             element_idx=i,
                             event_type=event_type,
@@ -484,7 +484,7 @@ class HttpClobWS:
                     # Log parser output
                     if books:
                         for book in books:
-                            log.info(
+                            log.debug(
                                 "ws_parser_output",
                                 token_id=book.token_id,
                                 ts=book.ts.isoformat(),
