@@ -442,3 +442,95 @@ class TestConsumeMarketFreezeFix:
                 rec.consume_market(48247, ["111"], window_end=window_end), timeout=5.0
             )
         assert any(e.get("event") == "heartbeat" for e in logs)
+
+
+# ----- REGRESSION TEST: instrumentation_verbose=False must still INSERT book_snapshots -----
+
+
+class TestInstrumentationVerboseRegression:
+    """Regression test for bug where instrumentation_verbose=False stopped book_snapshots INSERT.
+
+    Bug discovered Jul 6, 2026: production DB showed book_snapshots stopped recording
+    at Jul 4 23:32, while signals continued normally. Root cause: logging reduction
+    commit (b13ad26) may have inadvertently broken _should_persist() or _persist_book()
+    logic when instrumentation_verbose=False.
+
+    This test verifies that with instrumentation_verbose=False (the default), book_snapshots
+    are ACTUALLY INSERTED into the database, not just logged.
+    """
+
+    async def test_persist_with_instrumentation_verbose_false(self, store: Store) -> None:
+        """With instrumentation_verbose=False, book_snapshots MUST still be inserted."""
+        clock = SimClock(WS)
+        items = [
+            (_book(token="111", bid="0.52", ask="0.55", bid_size="100", ask_size="80"), 0.0),
+            (_book(token="111", bid="0.53", ask="0.56", bid_size="101", ask_size="81"), 1.2),
+            (_book(token="111", bid="0.54", ask="0.57", bid_size="102", ask_size="82"), 1.2),
+        ]
+        rec = _rec(
+            store,
+            FakeBookWS(items, clock),
+            clock,
+            instrumentation_verbose=False,  # CRITICAL: default value
+        )
+
+        # Act: consume market data
+        written = await rec.consume_market(48247, ["111"], window_end=WE)
+
+        # Assert: Verify book_snapshots are ACTUALLY INSERTED in DB
+        snaps = await store.get_book_snapshots(48247)
+        non_gap = [s for s in snaps if not s.gap]
+
+        # CRITICAL ASSERTION: Must have written snapshots to DB
+        assert len(non_gap) > 0, "NO book_snapshots inserted with instrumentation_verbose=False!"
+        assert written == len(snaps), f"Written count {written} != actual DB rows {len(snaps)}"
+
+        # Verify data integrity: all 3 books should be persisted (price changes + last snapshot)
+        assert len(non_gap) == 3, f"Expected 3 snapshots (price changes), got {len(non_gap)}"
+        assert non_gap[0].best_bid == Decimal("0.52")
+        assert non_gap[1].best_bid == Decimal("0.53")
+        assert non_gap[2].best_bid == Decimal("0.54")
+
+    async def test_persist_mode_changes_with_verbose_false(self, store: Store) -> None:
+        """Verify book_persist_mode='changes' works with instrumentation_verbose=False."""
+        clock = SimClock(WS)
+        # Same best prices → should throttle, but first + last always saved
+        items = [
+            (_book(bid="0.52", bid_size="100"), 0.0),  # first
+            (_book(bid="0.52", bid_size="101"), 0.2),  # throttled (same price, <1s)
+            (_book(bid="0.52", bid_size="102"), 0.2),  # throttled
+            (_book(bid="0.52", bid_size="103"), 0.2),  # last (penanda penutup)
+        ]
+        rec = _rec(
+            store,
+            FakeBookWS(items, clock),
+            clock,
+            book_persist_mode="changes",  # Default mode
+            instrumentation_verbose=False,  # Default verbosity
+        )
+
+        written = await rec.consume_market(48247, ["111"], window_end=WE)
+
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert len(snaps) == 2, f"Expected first + last snapshot, got {len(snaps)}"
+        assert written == len(snaps)
+        assert snaps[0].bid_depth == Decimal("100")  # first
+        assert snaps[-1].bid_depth == Decimal("103")  # last
+
+    async def test_persist_mode_all_with_verbose_false(self, store: Store) -> None:
+        """Verify book_persist_mode='all' works with instrumentation_verbose=False."""
+        clock = SimClock(WS)
+        items = [(_book(bid_size=str(100 + i)), 0.0) for i in range(4)]
+        rec = _rec(
+            store,
+            FakeBookWS(items, clock),
+            clock,
+            book_persist_mode="all",
+            instrumentation_verbose=False,
+        )
+
+        written = await rec.consume_market(48247, ["111"], window_end=WE)
+
+        snaps = [s for s in await store.get_book_snapshots(48247) if not s.gap]
+        assert len(snaps) == 4, "mode='all' with verbose=False must persist every snapshot"
+        assert written == len(snaps)
