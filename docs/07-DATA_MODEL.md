@@ -130,3 +130,106 @@ Diisi oleh resolution recorder (`data/resolver.py`) setelah `window_end`:
 Tambah `asset` (BTC|ETH|SOL) & `timeframe` (5m|15m) — atau `market_key =
 asset_timeframe` — ke: `rounds`, `orders`, `round_results`, `equity_curve`.
 Index per `market_key`. PnL & metrik dapat dipecah per market. Lihat docs/14 §14.9.
+
+
+---
+
+## ADDENDUM — Pure Arbitrage Opportunity Fields (Planned)
+
+> **Status**: Rencana untuk Phase 1 detector (docs/15). Belum diimplementasi.
+
+### Optional Table: `arb_opportunities`
+
+Untuk merekam pure intra-market lock-pair arbitrage opportunities yang terdeteksi (read-only measurement, bukan execution).
+
+```sql
+CREATE TABLE IF NOT EXISTS arb_opportunities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_no INTEGER NOT NULL,
+    ts TEXT NOT NULL,                   -- ISO8601 UTC
+    token_up TEXT NOT NULL,
+    token_down TEXT NOT NULL,
+    ask_up TEXT NOT NULL,               -- Decimal as string
+    ask_down TEXT NOT NULL,
+    depth_up TEXT NOT NULL,
+    depth_down TEXT NOT NULL,
+    sum_asks TEXT NOT NULL,             -- ask_up + ask_down
+    fee_total TEXT NOT NULL,            -- fee_up + fee_down
+    slippage_buffer TEXT NOT NULL,      -- estimated slippage
+    net_lock_edge TEXT NOT NULL,        -- 1 - sum_asks - fee_total - slippage_buffer
+    max_lock_size TEXT NOT NULL,        -- min(depth_up, depth_down)
+    duration_ms INTEGER,                -- how long opportunity lasted (NULL if not tracked)
+    valid INTEGER NOT NULL,             -- 1 = valid opportunity, 0 = rejected
+    reject_reason TEXT,                 -- if valid=0: reason (e.g., "net_lock_edge_too_low")
+    mode TEXT NOT NULL                  -- 'backtest' or 'readonly'
+);
+
+CREATE INDEX IF NOT EXISTS idx_arb_opp_round ON arb_opportunities(round_no);
+CREATE INDEX IF NOT EXISTS idx_arb_opp_ts ON arb_opportunities(ts);
+CREATE INDEX IF NOT EXISTS idx_arb_opp_valid ON arb_opportunities(valid);
+```
+
+### Field Descriptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `round_no` | int | Round identifier |
+| `ts` | datetime | Timestamp opportunity detected |
+| `token_up` / `token_down` | str | Token IDs |
+| `ask_up` / `ask_down` | Decimal | Best ask prices |
+| `depth_up` / `depth_down` | Decimal | Depth at best ask |
+| `sum_asks` | Decimal | ask_up + ask_down |
+| `fee_total` | Decimal | Estimated total fee (fee_up + fee_down, ~7% each) |
+| `slippage_buffer` | Decimal | Estimated slippage (e.g., 0.2%) |
+| `net_lock_edge` | Decimal | 1 - sum_asks - fee_total - slippage_buffer (profit if > 0) |
+| `max_lock_size` | Decimal | min(depth_up, depth_down) — max contracts for lock |
+| `duration_ms` | int | How long opportunity lasted (NULL if single snapshot) |
+| `valid` | bool | 1 if valid opportunity, 0 if rejected |
+| `reject_reason` | str | If rejected: reason (e.g., "net_edge_too_low", "depth_insufficient") |
+| `mode` | str | 'backtest' or 'readonly' |
+
+### Reject Reasons
+
+- `"net_lock_edge_too_low"`: net_lock_edge < MIN_LOCK_EDGE threshold
+- `"depth_insufficient"`: max_lock_size < MIN_DEPTH threshold
+- `"sum_asks_too_high"`: sum_asks >= MAX_SUM_ASKS (e.g., 0.99)
+- `"empty_book"`: one or both sides have no liquidity
+- `"latency_exceeded"`: detection latency > threshold
+
+### Alternative: CSV Export Only
+
+Table creation OPTIONAL. Detector dapat export langsung ke CSV tanpa persist ke DB.
+
+Decision: Will be made during implementation. For G1 measurement, CSV export sufficient.
+
+### Domain Model (Planned)
+
+```python
+@dataclass(frozen=True)
+class ArbOpportunity:
+    """Pure intra-market lock-pair arbitrage opportunity."""
+    round_no: int
+    ts: datetime
+    token_up: str
+    token_down: str
+    ask_up: Decimal
+    ask_down: Decimal
+    depth_up: Decimal
+    depth_down: Decimal
+    sum_asks: Decimal
+    fee_total: Decimal
+    slippage_buffer: Decimal
+    net_lock_edge: Decimal
+    max_lock_size: Decimal
+    valid: bool
+    reject_reason: str | None
+```
+
+### Migration Notes
+
+**NO migration sekarang**. Ini hanya rencana. Jika nanti di-implement:
+- Tambah table via migration script
+- Update Store class dengan CRUD methods
+- Detector writes to store OR exports CSV
+
+**Prinsip**: Detector bersifat read-only. Tidak mengubah strategy/signal/sizing/execution logic.

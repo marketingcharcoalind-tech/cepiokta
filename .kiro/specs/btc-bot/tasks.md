@@ -62,3 +62,49 @@
 - [ ] M.2 MarketScanner + per-market Worker + PriceFeed per aset. _(Req 12)_
 - [ ] M.3 Risk multi-market & korelasi. _(Req 6,12)_
 - [ ] M.4 Rollout bertahap (validasi per market). _(Req 12)_
+
+
+
+---
+
+## Pure Intra-Market Arbitrage Detector (docs/15)
+
+> **Status**: PLANNED. Docs-only synchronization complete. Code implementation nanti setelah G1 decision.
+
+- [ ] **G6. Pure arb detector docs/spec sync** _(Req 13)_
+  - [x] docs/15-PURE_ARBITRAGE_DETECTOR.md created
+  - [x] PROMPT_GUIDE.md updated (PROMPT 1.7 added)
+  - [x] PROGRESS_TRACKER.md updated (task 1.7, blocker ARB1, measurement row)
+  - [x] docs/13-STRATEGY_PLAYBOOK.md updated (strategy #2b added)
+  - [x] docs/09-TESTING_AND_BACKTESTING.md updated (arb metrics section added)
+  - [x] docs/07-DATA_MODEL.md updated (arb_opportunities schema addendum)
+  - [x] docs/08-MODULE_SPECS.md updated (arb_detector module spec added)
+  - [x] docs/10-ROADMAP.md updated (Phase 1 optional arb detector)
+  - [x] docs/11-CONFIG_AND_SECRETS.md updated (ARB_DETECTOR_* env vars)
+  - [x] .kiro/specs/btc-bot/requirements.md updated (Requirement 13)
+  - [x] .kiro/specs/btc-bot/design.md updated (arb detector component)
+  - [x] .kiro/specs/btc-bot/tasks.md updated (this file)
+
+- [ ] **G7. Pure arb detector implementation (Phase 1 read-only)** — FUTURE _(Req 13)_
+  - [ ] domain/arbitrage.py: `detect_lock_pair()` pure function
+  - [ ] backtest/arb_detector.py: `replay_arb_detection()` + ArbDetectionReport
+  - [ ] config/settings.py: `ArbDetectorSettings` with validation
+  - [ ] tests/domain/test_arbitrage.py: unit tests (edge cases)
+  - [ ] tests/backtest/test_arb_detector.py: integration tests (replay synthetic data)
+  - [ ] CLI: `python -m btcbot.backtest.arb_detector` OR `report.py --mode arb-detection`
+  - [ ] CSV export + summary report (like loss_diagnostics)
+  - [ ] DoD: Detector identifies valid/rejected opportunities, records metrics, NO execution path, NO secrets required
+
+- [ ] **G8. Pure arb paper simulation (Phase 2)** — FUTURE _(Req 13)_
+  - [ ] Two-leg paper OMS mock
+  - [ ] Simulated one-leg exposure scenarios
+  - [ ] Report: two-leg success rate estimate, net PnL after execution risk
+
+- [ ] **G9. Pure arb live execution (Phase 3)** — FUTURE _(Req 13)_
+  - [ ] Two-leg OMS (atomic-ish submission)
+  - [ ] RiskManager veto for one-leg exposure
+  - [ ] Hedge plan if one-leg stuck
+  - [ ] Idempotency + cancel on partial fill
+  - [ ] Gate: ONLY if G1/G2 show stable opportunity + infrastructure ready
+
+**Current Status**: G6 complete (docs-only). G7-G9 await G1 decision.

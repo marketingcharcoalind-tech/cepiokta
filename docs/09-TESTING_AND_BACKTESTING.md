@@ -31,6 +31,8 @@ PaperOMS(fill model) → catat `round_results`.
   index bernilai `"1"`, bukan asumsi `Δ≥0` semata.
 
 ## 9.4 Metrik Wajib Dilaporkan
+
+### 9.4.1 Strategi Directional (#1 Fair-Value Taker)
 - Net PnL, ROI, jumlah ronde, win-rate aktual.
 - **Kalibrasi**: bucket `p_win` vs realized hit-rate (reliability curve).
 - Distribusi `net_edge` saat entry; berapa % ronde lulus filter.
@@ -39,6 +41,47 @@ PaperOMS(fill model) → catat `round_results`.
 - **Ablation**: PnL dengan vs tanpa fee, vs tanpa slippage, vs tanpa latensi.
   Fee taker **~7%** WAJIB disertakan; headline **Net PnL setelah fee**.
   (Untuk lihat apakah edge hilang setelah biaya — biasanya iya.)
+
+### 9.4.2 Pure Intra-Market Arbitrage Detector (Planned — docs/15)
+**Phase 1: Read-Only Measurement**
+- **Opportunity count**: total opportunities detected per day
+- **Valid vs rejected**: breakdown by reject_reason (net_lock_edge too low, depth insufficient, sum_asks >= 1)
+- **Duration distribution**: median, p25, p75, max (ms)
+  - Buckets: <10ms, 10-100ms, 100ms-1s, >1s
+  - Short duration (<100ms) may be impossible to fill
+- **Net lock edge distribution**: `1 - (ask_up + ask_down + fee_total + slippage_buffer)`
+  - Histogram by 0.1% buckets
+  - Median, mean, max
+- **Depth distribution**: `max_lock_size = min(depth_up, depth_down)`
+  - Histogram: <5, 5-10, 10-50, 50-100, >100 contracts
+  - Percentage with size >= min thresholds
+- **Theoretical locked PnL**: `sum(net_lock_edge * min(max_lock_size, position_limit))`
+
+**Phase 2: Simulated Two-Leg Fill (Future)**
+- **Two-leg success rate**: assuming N% success (90%, 95%, 99%)
+- **One-leg exposure scenarios**: frequency, loss impact
+- **Simulated net PnL**: after execution risk penalty
+- **Comparison**: pure arb PnL vs directional strategy PnL
+
+**Phase 3: Live Execution (Future)**
+- Actual two-leg fill success rate
+- One-leg stuck frequency & recovery
+- Real net PnL after fees + execution failures
+
+**Headline Metrics (G1 Report):**
+- Opportunity frequency (per day)
+- Median duration (can we fill in time?)
+- Median net_lock_edge (profit per lock)
+- Median max_lock_size (capital required)
+- Theoretical PnL vs directional PnL
+- Estimated PnL after execution risk
+
+**Ablation for Pure Arb:**
+- Fee estimate accuracy (actual vs estimated)
+- Slippage estimate accuracy
+- Latency impact on two-leg coordination
+- Competition (how many opportunities disappear before we can fill?)
+- One-leg fill failure rate simulation
 
 ## 9.5 Kriteria Lulus untuk Naik Fase
 - Fase 1→2: backtest menunjukkan `net_edge > 0` yang **stabil** di beberapa

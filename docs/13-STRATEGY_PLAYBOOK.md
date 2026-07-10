@@ -66,6 +66,44 @@ Beli "UP" Polymarket (cost = ask*size)  +  short underlying perp setara delta
 - ⚠️ Termasuk arb antar-market Polymarket sendiri (konsistensi 5m/15m/hourly).
 - **Kapan pakai:** setelah #1 stabil & Anda punya infra 2-venue.
 
+## 13.4b Strategi #2b — Pure Intra-Market Lock-Pair Arbitrage  🔒 outcome-independent
+Beli BOTH UP dan DOWN jika total cost < $1 (net fee+slippage).
+```
+ask_up + ask_down + fee_up + fee_down + slippage_buffer < 1.00
+=> buy both sides (lock pair)
+=> settlement always $1 (one side wins) => guaranteed profit
+```
+**Perbedaan dari #1 (Directional):**
+- #1 = predict outcome (beli SATU sisi) → outcome risk
+- #2b = beli BOTH (lock pair) → theoretically no outcome risk
+
+**Reality: Execution Risk > Outcome Risk**
+- ✅ Theoretically outcome-independent (one side always settles $1)
+- ❌ **Two-leg coordination**: jika leg1 fill tapi leg2 gagal → exposed directional
+- ❌ Price movement between leg1 and leg2
+- ❌ Depth disappears (competitor ambil liquidity)
+- ❌ Latency delay between legs
+- ❌ Actual fee/slippage > estimate
+
+**Kapan opportunity muncul:**
+Market inefficiency → sum(ask_up, ask_down) < 1 − fee − slippage
+
+**Phase Plan:**
+1. **Phase 1 (Pre-G1)**: Read-only detector + analysis (frequency, duration, depth, net_lock_edge)
+2. **Phase 2 (Paper)**: Two-leg fill simulation (success rate, one-leg exposure frequency)
+3. **Phase 3 (Live Micro)**: Real execution IF G1/G2 show stable opportunity + RiskManager ready
+
+**Infrastruktur Dibutuhkan (belum ada):**
+- Two-leg OMS (submit both, cancel if partial)
+- Hedge plan jika one-leg stuck
+- Idempotency (prevent double-fill)
+- Latency optimization (minimize gap leg1-leg2)
+- RiskManager veto for one-leg exposure
+
+**Status Saat Ini:** PLANNED (docs/15). Measurement belum ada.
+
+**Kapan pakai:** SETELAH detector (Fase 1) membuktikan opportunity frequent + stable + depth sufficient. JANGAN execute sebelum measurement.
+
 ## 13.5 Strategi #3 — Market Making + Fair-Value Anchor + Inventory Skew  📈 plafon tertinggi
 Pasang quote 2 sisi di sekitar fair value; miringkan oleh inventory; tarik saat referensi bergerak.
 ```
@@ -85,12 +123,16 @@ on inventory > cap: skew lebih agresif / stop satu sisi
 ```
 [#1 Fair-Value Taker]  --(stabil, PnL live + setelah biaya)-->
 [#2 Delta-Hedge Arb]   --(infra 2-venue, basis terkendali)-->
+[#2b Pure Lock-Pair]   --(detector shows opportunity, two-leg OMS ready)-->
 [#3 Market Making]     --(latensi rendah, kalibrasi terbukti)
 ```
 Gate naik level:
 - #1→#2: #1 profit live ≥ N hari; tersedia akun+modal venue hedge; basis diukur.
+- #1→#2b: detector (G1) shows frequent stable opportunity; two-leg OMS + RiskManager ready.
 - #2→#3: latensi order ack rendah & stabil; reprice < pergerakan referensi;
   uji MM di paper menunjukkan spread-capture > adverse selection.
+
+**Catatan #2b:** Parallel track, bukan replacement untuk #1. Complement, bukan substitute.
 
 ## 13.7 Checklist "Apakah Edge Benar-Benar Ada?"
 - [ ] Reliability curve terkalibrasi (P_up model ≈ hit-rate nyata).

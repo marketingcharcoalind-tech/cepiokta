@@ -155,3 +155,62 @@ CHAINLINK_SOLUSD_SOURCE=
 ```
 `markets.yaml` contoh ada di docs/14 §14.3. Aktifkan market satu per satu
 (enabled: true) hanya setelah lulus validasi edge + likuiditas.
+
+
+
+---
+
+## ADDENDUM (v1.4) — Env Pure Arbitrage Detector (PLANNED)
+
+> **Status**: Rencana untuk Phase 1 detector (docs/15). Belum diimplementasi.
+
+```dotenv
+# --- Pure Intra-Market Arbitrage Detector (Phase 1 read-only) ---
+ARB_DETECTOR_ENABLED=false           # Enable detector in backtest/readonly mode
+ARB_MAX_SUM_ASKS=0.99                # Max sum(ask_up, ask_down) to consider
+ARB_SLIPPAGE_BUFFER=0.002            # Estimated slippage buffer (0.2%)
+ARB_MIN_LOCK_EDGE=0.001              # Min net lock edge (0.1%) for valid opportunity
+ARB_MIN_DEPTH=5                      # Min depth (contracts) on both sides
+ARB_MAX_LOCK_SIZE=50                 # Max size per lock (safety cap, contracts)
+```
+
+**Keterangan:**
+- `ARB_DETECTOR_ENABLED`: Enable/disable detector. Default=false (opt-in).
+- `ARB_MAX_SUM_ASKS`: Reject if `ask_up + ask_down >= this threshold` (e.g., 0.99).
+- `ARB_SLIPPAGE_BUFFER`: Conservative slippage estimate (e.g., 0.2% = 0.002).
+- `ARB_MIN_LOCK_EDGE`: Minimum `1 - sum_asks - fee - slippage` to be valid (e.g., 0.1%).
+- `ARB_MIN_DEPTH`: Minimum depth on BOTH sides (e.g., 5 contracts).
+- `ARB_MAX_LOCK_SIZE`: Safety cap on lock size (e.g., 50 contracts max).
+
+**Settings Class (Planned):**
+```python
+@dataclass
+class ArbDetectorSettings:
+    enabled: bool = False
+    max_sum_asks: Decimal = Decimal("0.99")
+    slippage_buffer: Decimal = Decimal("0.002")
+    min_lock_edge: Decimal = Decimal("0.001")
+    min_depth: Decimal = Decimal("5")
+    max_lock_size: Decimal = Decimal("50")
+    
+    def validate(self):
+        if self.max_sum_asks <= 0 or self.max_sum_asks >= 1:
+            raise ValueError("ARB_MAX_SUM_ASKS must be in (0, 1)")
+        if self.slippage_buffer < 0:
+            raise ValueError("ARB_SLIPPAGE_BUFFER must be >= 0")
+        if self.min_lock_edge <= 0:
+            raise ValueError("ARB_MIN_LOCK_EDGE must be > 0")
+        if self.min_depth <= 0:
+            raise ValueError("ARB_MIN_DEPTH must be > 0")
+        if self.max_lock_size <= 0:
+            raise ValueError("ARB_MAX_LOCK_SIZE must be > 0")
+```
+
+**IMPORTANT**: Ini hanya rencana config. JANGAN ubah `.env` live sekarang.
+
+**Phase Plan:**
+- **Phase 1**: Detector enabled in backtest mode only (read-only measurement)
+- **Phase 2**: Paper simulation (two-leg coordination test)
+- **Phase 3**: Live execution IF G1/G2 shows stable opportunity + RiskManager ready
+
+**NO execution in Phase 1**. Config hanya untuk detector parameters, bukan execution.

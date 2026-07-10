@@ -329,6 +329,35 @@ sensitivitas grid (T_ENTRY_SEC x DELTA_THRESHOLD x MAX_PRICE), dan ablation
 DoD: jalankan pada data terekam Fase 0 dan tampilkan laporannya ke saya.
 ```
 
+## PROMPT 1.7 — Pure Intra-Market Arbitrage Detector (READ-ONLY)
+```
+Baca docs/15-PURE_ARBITRAGE_DETECTOR.md. Ini adalah riset track tambahan di Fase 1
+untuk mengukur "pure intra-market lock-pair arbitrage" opportunities, BERBEDA dari
+strategi directional resolution farming saat ini.
+
+Definisi: Pure arb = beli UP DAN DOWN jika `ask_up + ask_down + fee + slippage < 1`.
+Secara teori outcome-independent (salah satu settle $1), tapi REAL RISK = execution
+risk (one-leg fill failure).
+
+UNTUK SEKARANG: docs-only synchronization. JANGAN implement code trading.
+JANGAN submit order. JANGAN ubah file runtime kecuali dokumentasi.
+
+Task nanti (setelah G1 LANJUT):
+- Implement domain/arbitrage.py: detect_lock_pair() pure function (NO I/O)
+- Implement backtest/arb_detector.py: replay_arb_detection() read-only
+- Calculate `net_lock_edge = 1 - (ask_up + ask_down + fee_total + slippage_buffer)`
+- Catat opportunity ke CSV/report: count, duration_ms, net_edge, depth
+- TIDAK ADA OMS, TIDAK ADA order, TIDAK ADA signer
+
+DoD (future implementation):
+- Detector report membandingkan opportunity pure arb vs resolution farming
+- Metrics: frequency, duration, theoretical PnL, simulated two-leg fill success
+- Phase 1: measurement only; Phase 2: paper simulation; Phase 3: live micro IF G1/G2 pass
+- Safety: detector read-only TIDAK boleh call OMS/signing/secrets
+
+Untuk task sekarang: hanya tambahkan prompt ini. Code implementation nanti.
+```
+
 ## ✅ GATE G1 — keputusan berbasis data
 > ✅ VERIFIED (lihat VERIFIED REALITY #3,#6): keputusan edge harus **net fee 7% +
 > slippage**, stabil lintas beberapa hari (anti-overfit), pakai **label Gamma**.

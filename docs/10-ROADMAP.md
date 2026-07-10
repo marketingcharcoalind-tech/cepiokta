@@ -18,7 +18,14 @@
 - [ ] `domain/market.py`, `domain/signal.py` (p_win, net_edge), `domain/strategy.py`, `exec/sizing.py`.
 - [ ] `backtest/replay.py` dengan fill model (slippage, latensi, kompetisi).
 - [ ] Laporan metrik + kalibrasi + sensitivitas (docs/09).
-- **DoD**: laporan edge bersih jujur. Keputusan lanjut/stop berdasarkan data.
+- [ ] **OPTIONAL**: Pure Arbitrage Detector (read-only) — docs/15
+  - Tambahan riset track untuk mengukur pure intra-market lock-pair opportunities
+  - `backtest/arb_detector.py`: detect opportunities where `ask_up+ask_down+fee+slippage<1`
+  - Report: frequency, duration, net_lock_edge, depth, theoretical PnL
+  - Read-only measurement ONLY (no execution, no orders)
+  - BUKAN syarat untuk lulus G1, tapi complement analysis
+- **DoD**: laporan edge bersih jujur untuk strategi directional (#1 Fair-Value Taker).
+  Keputusan lanjut/stop berdasarkan data. OPTIONAL: laporan comparison pure arb vs directional.
   *(Jika edge ≤ 0 setelah biaya: berhenti / revisi strategi — itu hasil yang valid.)*
 
 ## Fase 2 — Paper Trading  (Gate G2)

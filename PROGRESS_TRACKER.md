@@ -52,6 +52,7 @@
 | 1.4 | Sizing (Kelly + caps) | exec/sizing.py | ✅ | ✅ | 2026-06-27 | `size(signal,…)→Decimal` pakai net_edge net-of-fee + round_to_tick + min_order; refactor `_capped_size` (compute_size tetap); 720+ invariant cases |
 | 1.5 | Replay engine + fill model | backtest/replay.py | ✅ | ✅ | 2026-06-27 | SimClock→SignalEngine→Strategy→Sizer→fill model; FOK/FAK level-walk slippage + fee7% + latency + kompetisi; settle label Gamma; reconstruct_ticks(LVCF)+run_and_persist(mode=backtest); deterministik; 19 test |
 | 1.6 | Laporan metrik & kalibrasi | backtest reporting | ✅ | ✅ | 2026-06-27 | report.py (Net PnL net-of-fee, ROI, win-rate, net_edge dist, reliability curve label Gamma, max DD, varians, sensitivity grid, ablation fee/slippage/latency) + scripts/backtest_report.py CLI; RoundDiagnostics + slippage_enabled di replay; 17 test |
+| 1.7 | Pure arb detector read-only | docs/15 + backtest/arb_detector.py (future) | ⬜ | ⬜ | | planned: detect UP+DOWN lock-pair opportunity (ask_up+ask_down+fee+slippage<1); read-only measurement; NO execution |
 
 **GATE G1 — KEPUTUSAN EDGE (paling kritikal):**
 - net_edge > 0 stabil lintas parameter? ⬜ Ya ⬜ Tidak
@@ -149,6 +150,7 @@ Fase 4 [          ] 0/3     G4: belum
 | PreG1-Discovery | Discovery blocker (0 markets) — FIXED | 2026-07-04 | bot dry-run gagal: discovery loop nol market btc-updown-5m | ROOT CAUSE: (1) slug epoch = window_START bukan END (verified 3+ samples); (2) 12h buffer end_date window berisiko 500-cap. FIX: by-slug discovery (6 windows 5m / 4 windows 15m), aligned epochs, no cap risk, 6-8 API calls (vs 144 dengan 12h). Fixes: _window_start/end() pakai epoch+tf correctly; gamma.py: DISCOVERY_NUM_WINDOWS. Tests: 1183 pass, updated for by-slug mocks. GATE: user MUST verify VPS dry-run (markets sparse ~8h gap normal). See DISCOVERY_FIX_V2.md, DISCOVERY_FINAL_REPORT.md | ✅ |
 | PreG1-Logging | Logging verbosity reduction (22GB→3GB) — DONE | 2026-07-04 | soak-run readonly 24h+ generated 22GB logs, disk full, bot restart ribuan kali | SOLUTION (Pure Logging, NO behavior change): (1) WS frame logs (ws_frame_received, ws_parser_output) → DEBUG level; (2) persist_decision logs → gated by INSTRUMENTATION_VERBOSE flag (default false); (3) New env flag INSTRUMENTATION_VERBOSE (Settings→Recorder). IMPACT: 4.3M→720K lines/24h, 22GB→3-4GB (83% reduction). VERIFICATION: 1183 tests pass, NO persistence/throttle/WS parsing changes. DEFAULT: only boot/round events/persist_book/resolution/errors/heartbeat. See LOGGING_REDUCTION_REPORT.md | ✅ |
 | CritBug-BookSnap | Book snapshots stopped recording (INVESTIGATED) | 2026-07-06 | Production DB: book_snapshots stopped Jul 4 23:32, signals continue normally (360 rounds resolved, 362 with signals, only 116 with book_snapshots) | INVESTIGATION: Code review shows NO BUG in recorder logic. All return statements correctly placed outside `if instrumentation_verbose:` blocks. The flag ONLY affects logging, NOT persistence. Root cause must be: (1) WebSocket stopped delivering books, (2) Market discovery issues, (3) External API changes, or (4) Process/config changes. Regression tests added (TestInstrumentationVerboseRegression). VPS diagnostics required. See BOOK_SNAPSHOTS_BUG_INVESTIGATION.md, VPS_DIAGNOSTICS.md | 🟦 |
+| ARB1 | Pure arb belum diukur | 2026-07-09 | perlu detector read-only untuk UP+DOWN lock-pair opportunity (ask_up+ask_down+fee+slippage<1); opportunity frequency/duration/depth/net_lock_edge belum terukur | planned: docs/15 + backtest/arb_detector.py (read-only measurement, NO execution); Phase 1: detector+analysis; Phase 2: paper simulation; Phase 3: live micro IF G1/G2 pass | ⬜ |
 
 ## 🧠 Decision Log (ADR ringkas)
 | Tgl | Keputusan | Alasan | ADR file |
@@ -174,6 +176,7 @@ Fase 4 [          ] 0/3     G4: belum
 | Backtest (G1) | | | | | |
 | Paper (G2) | | | | | |
 | Live (G3) | | | | | |
+| Pure arb detector (G1) | | | | | opportunity count, duration_ms, depth, net_lock_edge, simulated two-leg fill success |
 
 
 

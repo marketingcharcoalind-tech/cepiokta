@@ -61,6 +61,68 @@ book_snapshots+signals untuk backtest.
 Putar ulang data terekam lewat SignalEngine+Strategy+Sizer+(paper)OMS dengan
 SimClock. Output metrik (docs/09).
 
+## 8.13b backtest/arb_detector.py — Pure Arbitrage Detector (PLANNED)
+**Status**: Rencana untuk Phase 1 (docs/15). Belum diimplementasi.
+
+**Purpose**: Read-only detector untuk mengukur pure intra-market lock-pair arbitrage opportunities.
+
+**Contract** (domain pure function):
+```python
+def detect_lock_pair(
+    book_up: OrderBook,
+    book_down: OrderBook,
+    fee_model: FeeModel,
+    slippage_buffer: Decimal,
+    min_lock_edge: Decimal,
+    min_depth: Decimal,
+) -> ArbOpportunity | None:
+    """
+    Deteksi opportunity: ask_up + ask_down + fee_total + slippage_buffer < 1.
+    
+    Returns:
+        ArbOpportunity jika valid (net_lock_edge > min_lock_edge & depth sufficient)
+        None jika tidak ada opportunity
+    
+    Pure function: NO side effects, NO I/O, NO API calls.
+    """
+```
+
+**Replay Integration**:
+```python
+async def replay_arb_detection(
+    store: Store,
+    since: datetime,
+    until: datetime,
+    config: ArbDetectorConfig,
+) -> ArbDetectionReport:
+    """
+    Replay book snapshots, detect opportunities, return report.
+    
+    READ-ONLY. No orders. No execution.
+    
+    Returns:
+        ArbDetectionReport with:
+        - total_opportunities, valid_opportunities
+        - duration distribution (median, p25, p75)
+        - net_edge histogram
+        - depth histogram
+        - theoretical PnL
+        - simulated PnL (with execution risk assumptions)
+    """
+```
+
+**Dependencies**: domain/models (OrderBook, FeeModel), domain/fees. TIDAK boleh import adapters/OMS/signing.
+
+**Output**: CSV export + summary report (similar to loss_diagnostics).
+
+**DoD (future implementation)**:
+- Detector identifies valid opportunities (sum_asks + fee + slippage < 1)
+- Detector rejects invalid (net_edge too low, depth insufficient)
+- Detector records metrics: count, duration, edge, depth per opportunity
+- Detector does NOT call OMS / order API
+- Detector does NOT require private key / API key
+- Report compares pure arb vs directional strategy metrics
+
 ## 8.14 app/cli.py — Boot & Runner
 Tampilkan boot sequence ala referensi:
 ```
