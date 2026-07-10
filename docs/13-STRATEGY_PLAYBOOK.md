@@ -71,7 +71,7 @@ Beli BOTH UP dan DOWN jika total cost < $1 (net fee+slippage).
 ```
 ask_up + ask_down + fee_up + fee_down + slippage_buffer < 1.00
 => buy both sides (lock pair)
-=> settlement always $1 (one side wins) => guaranteed profit
+=> settlement always $1 before execution risk => theoretical locked profit if both legs fill as modeled
 ```
 **Perbedaan dari #1 (Directional):**
 - #1 = predict outcome (beli SATU sisi) → outcome risk

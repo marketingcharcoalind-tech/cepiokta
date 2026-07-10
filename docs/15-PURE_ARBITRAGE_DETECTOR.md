@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-**Pure intra-market arbitrage** adalah strategi lock-pair yang membeli BOTH UP dan DOWN jika total cost (termasuk fee + slippage) < $1. Karena salah satu outcome akan settle $1, ini secara teori adalah **outcome-independent profit**.
+**Pure intra-market arbitrage** adalah strategi lock-pair yang membeli BOTH UP dan DOWN jika total cost (termasuk fee + slippage) < $1. Karena salah satu outcome akan settle $1, ini secara **teori** adalah outcome-independent profit **sebelum execution risk**.
 
 **PERBEDAAN KRITIS dengan strategi saat ini**:
 - Strategi saat ini = **directional** (resolution farming / fair-value taker)
@@ -58,9 +58,11 @@ Jika `net_lock_edge > 0` → theoretically profitable.
 Setelah lock:
 - Jika outcome = UP → token UP settle $1, token DOWN settle $0
 - Jika outcome = DOWN → token DOWN settle $1, token UP settle $0
-- Total settlement = $1 guaranteed
+- Total settlement = $1 (outcome-independent)
 
 **Profit teoritis** = $1 - total_cost = net_lock_edge * size
+
+**PENTING**: Ini profit **teoritis** (before execution risk). Real profit tergantung keberhasilan two-leg fill.
 
 ### 2.4 Reality: Execution Risk
 
@@ -462,7 +464,7 @@ Detector report harus membandingkan:
 |--------|----------------------------|---------------------|
 | Opportunities | 85 entries (t=60,d=50,p=0.99) | ? |
 | Avg Edge | net_edge @ entry | net_lock_edge |
-| Win Rate | 94.1% | 100% (theoretical) |
+| Win Rate | 94.1% | 100% (theoretical, before execution risk) |
 | Avg PnL/Trade | ~$0.03 | ? |
 | Execution Risk | Outcome prediction | One-leg fill failure |
 | Capital Efficiency | ~10% per trade | ~20% per lock (both legs) |
@@ -523,7 +525,8 @@ Phase 3 (Live Micro): Real execution
 
 ## 17. References
 
-- **Polymarket "100% winrate" strategies**: Intra-market arb, latency arb, cross-platform arb, resolution farming
+- **Polymarket "100% winrate" strategies**: Intra-market arb, latency arb, cross-platform arb, resolution farming  
+  *(Note: "100% winrate" is marketing shorthand; real systems still carry execution risk, fee variability, latency, and one-leg exposure risk)*
 - **Current strategy**: `docs/13-STRATEGY_PLAYBOOK.md` (#1 Fair-Value Taker)
 - **Risk management**: `docs/06-RISK_MANAGEMENT.md` (RiskManager veto gates)
 - **Fee model**: `src/btcbot/domain/fees.py` (ProportionalTakerFee ~7%)
