@@ -49,8 +49,11 @@ class BookStabilityMetrics:
 
     # Identity
     round_no: int
-    entry_ts: datetime
-    time_left_entry: float  # seconds from entry to window_end
+    entry_decision_ts: datetime  # EXACT tick when EnterOrder emitted
+    entry_fill_ts: datetime  # EXACT tick when fill occurred (after latency)
+    decision_time_left: float  # seconds from decision to window_end
+    fill_time_left: float  # seconds from fill to window_end
+    decision_to_fill_seconds: float  # latency (fill_ts - decision_ts)
     side_taken: str  # UP/DOWN
     resolved_outcome: str  # UP/DOWN
     result: str  # WIN/LOSS
@@ -220,7 +223,8 @@ def _compute_stability_metrics(
     round_window_end: datetime,
     post_entry_snapshots: Sequence[BookSnapshot],
     thresholds: StabilityThresholds,
-    entry_ts: datetime,
+    entry_decision_ts: datetime,
+    entry_fill_ts: datetime,
     token_id_up: str,
     token_id_down: str,
 ) -> BookStabilityMetrics:
@@ -229,15 +233,21 @@ def _compute_stability_metrics(
     Args:
         result: RoundResult from ReplayEngine (entry details, PnL)
         round_window_end: window_end datetime for time_left calculation
-        post_entry_snapshots: book snapshots from entry_ts to window_end
+        post_entry_snapshots: book snapshots from entry_fill_ts to window_end
         thresholds: stability warning thresholds
-        entry_ts: approximate entry timestamp
+        entry_decision_ts: EXACT tick timestamp when EnterOrder emitted
+        entry_fill_ts: EXACT tick timestamp when fill occurred (after latency)
         token_id_up: UP token ID from round
         token_id_down: DOWN token ID from round
 
     Returns:
         BookStabilityMetrics with all flags and extremes computed.
     """
+    # Compute exact timing metrics
+    decision_time_left = (round_window_end - entry_decision_ts).total_seconds()
+    fill_time_left = (round_window_end - entry_fill_ts).total_seconds()
+    decision_to_fill_seconds = (entry_fill_ts - entry_decision_ts).total_seconds()
+
     # Leader side determination
     leader = Outcome(result.side_taken)
     opposite = Outcome.DOWN if leader is Outcome.UP else Outcome.UP
@@ -299,10 +309,9 @@ def _compute_stability_metrics(
             first_instability_ts = snap.ts
             break
 
-    # Timing calculations with provided entry_ts
-    time_left_entry_calc = (round_window_end - entry_ts).total_seconds()
+    # Timing calculations for instability
     seconds_after_entry = (
-        (first_instability_ts - entry_ts).total_seconds()
+        (first_instability_ts - entry_fill_ts).total_seconds()
         if first_instability_ts is not None
         else None
     )
@@ -317,8 +326,11 @@ def _compute_stability_metrics(
 
     return BookStabilityMetrics(
         round_no=result.round_no,
-        entry_ts=entry_ts,
-        time_left_entry=time_left_entry_calc,
+        entry_decision_ts=entry_decision_ts,
+        entry_fill_ts=entry_fill_ts,
+        decision_time_left=decision_time_left,
+        fill_time_left=fill_time_left,
+        decision_to_fill_seconds=decision_to_fill_seconds,
         side_taken=result.side_taken,
         resolved_outcome="",  # Fill from round if needed
         result=result_label,
@@ -403,15 +415,29 @@ async def run_diagnostics(
         if rnd.window_end is None:
             continue
 
-        # Fail closed: entry must have exact fill timestamp from observability
-        if obs.entry_fill_ts is None:
-            # This should never happen if result is not None, but fail safely
+        # Fail closed: entry must have both exact timestamps from observability
+        if obs.entry_decision_ts is None or obs.entry_fill_ts is None:
             raise RuntimeError(
-                f"Round {result.round_no}: entry occurred but no entry_fill_ts in observation. "
-                "This indicates a replay engine bug."
+                f"Round {result.round_no}: entry occurred but missing entry_decision_ts "
+                f"or entry_fill_ts in observation. This indicates a replay engine bug."
             )
 
+        entry_decision_ts = obs.entry_decision_ts
         entry_fill_ts = obs.entry_fill_ts
+
+        # Fail closed: timestamps must be valid (fill after decision, non-negative latency)
+        if entry_fill_ts < entry_decision_ts:
+            raise RuntimeError(
+                f"Round {result.round_no}: entry_fill_ts ({entry_fill_ts}) < "
+                f"entry_decision_ts ({entry_decision_ts}). Invalid timing."
+            )
+
+        decision_to_fill = (entry_fill_ts - entry_decision_ts).total_seconds()
+        if decision_to_fill < 0:
+            raise RuntimeError(
+                f"Round {result.round_no}: decision_to_fill_seconds={decision_to_fill:.2f} < 0. "
+                "Invalid timing."
+            )
 
         # Load book snapshots
         all_snaps = await store.get_book_snapshots(result.round_no)
@@ -421,10 +447,10 @@ async def run_diagnostics(
             if not s.gap and s.ts >= entry_fill_ts and s.ts <= rnd.window_end
         ]
 
-        # Compute metrics
+        # Compute metrics with both exact timestamps
         metrics = _compute_stability_metrics(
             result, rnd.window_end, post_entry, thresholds,
-            entry_fill_ts, rnd.token_id_up, rnd.token_id_down
+            entry_decision_ts, entry_fill_ts, rnd.token_id_up, rnd.token_id_down
         )
         # Fill resolved_outcome from round (use replace() for slotted dataclass)
         metrics = replace(
@@ -512,13 +538,15 @@ def format_report(diagnostics: BookStabilityDiagnostics, thresholds: StabilityTh
         lines.append("")
         for m in losses:
             lines.append(f"Round: {m.round_no}")
-            lines.append(f"  Entry: {m.entry_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC, time_left {m.time_left_entry:.1f}s")
+            lines.append(f"  Decision: {m.entry_decision_ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC, time_left {m.decision_time_left:.1f}s")
+            lines.append(f"  Fill: {m.entry_fill_ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC, time_left {m.fill_time_left:.1f}s")
+            lines.append(f"  Decision-to-fill: {m.decision_to_fill_seconds:.2f}s")
             lines.append(f"  Side: {m.side_taken}, Entry price: {m.entry_price}")
             lines.append(f"  Resolved: {m.resolved_outcome}, PnL: ${m.pnl:.6f}")
             lines.append(f"  Book flip warning: {m.book_flip_warning}")
             if m.first_instability_ts:
-                lines.append(f"  First instability: {m.first_instability_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                lines.append(f"  Seconds after entry: {m.seconds_after_entry_to_instability:.1f}s")
+                lines.append(f"  First instability: {m.first_instability_ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC")
+                lines.append(f"  Seconds after fill: {m.seconds_after_entry_to_instability:.1f}s")
                 lines.append(f"  Time left at instability: {m.time_left_at_instability:.1f}s")
             lines.append(f"  Min leader bid: {m.min_leader_bid_after_entry}")
             lines.append(f"  Max opposite bid: {m.max_opposite_bid_after_entry}")
@@ -536,8 +564,11 @@ def write_csv(diagnostics: BookStabilityDiagnostics, path: Path) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         fieldnames = [
             "round_no",
-            "entry_ts",
-            "time_left_entry",
+            "entry_decision_ts",
+            "entry_fill_ts",
+            "decision_time_left",
+            "fill_time_left",
+            "decision_to_fill_seconds",
             "side_taken",
             "resolved_outcome",
             "result",
@@ -567,8 +598,11 @@ def write_csv(diagnostics: BookStabilityDiagnostics, path: Path) -> None:
         for m in diagnostics.metrics:
             row = {
                 "round_no": m.round_no,
-                "entry_ts": m.entry_ts.isoformat() if m.entry_ts else "",
-                "time_left_entry": f"{m.time_left_entry:.2f}",
+                "entry_decision_ts": m.entry_decision_ts.isoformat() if m.entry_decision_ts else "",
+                "entry_fill_ts": m.entry_fill_ts.isoformat() if m.entry_fill_ts else "",
+                "decision_time_left": f"{m.decision_time_left:.2f}",
+                "fill_time_left": f"{m.fill_time_left:.2f}",
+                "decision_to_fill_seconds": f"{m.decision_to_fill_seconds:.3f}",
                 "side_taken": m.side_taken,
                 "resolved_outcome": m.resolved_outcome,
                 "result": m.result,

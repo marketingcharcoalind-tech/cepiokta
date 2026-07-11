@@ -82,27 +82,31 @@ class TestComputeStabilityMetrics:
     def test_stable_winning_trade_no_warning(self) -> None:
         """Stable trade with no book instability should have no warnings."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)  # 3s latency
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("4.5"))
 
         # Stable book: leader stays high, opposite stays low
         snapshots = [
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.04"), Decimal("0.06")),
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=30), Decimal("0.95"), Decimal("0.97")),
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=30), Decimal("0.03"), Decimal("0.05")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=10), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=10), Decimal("0.04"), Decimal("0.06")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=30), Decimal("0.95"), Decimal("0.97")),
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=30), Decimal("0.03"), Decimal("0.05")),
         ]
 
         thresholds = StabilityThresholds()
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.round_no == 1234567890
         assert metrics.side_taken == "UP"
         assert metrics.result == "WIN"
         assert metrics.entry_price == Decimal("0.96")
+        assert metrics.decision_time_left == 60.0
+        assert metrics.fill_time_left == 57.0
+        assert metrics.decision_to_fill_seconds == 3.0
         assert metrics.book_flip_warning is False
         assert metrics.leader_bid_below_0_90 is False
         assert metrics.opposite_bid_above_0_10 is False
@@ -111,20 +115,21 @@ class TestComputeStabilityMetrics:
     def test_leader_bid_drops_below_threshold(self) -> None:
         """Leader bid drops below threshold should trigger warning."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("-5.0"))
 
         # Leader bid crashes
         snapshots = [
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.88"), Decimal("0.90")),  # Crash!
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=10), Decimal("0.88"), Decimal("0.90")),  # Crash!
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
         ]
 
         thresholds = StabilityThresholds(leader_bid_warn=Decimal("0.90"))
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.result == "LOSS"
@@ -136,20 +141,21 @@ class TestComputeStabilityMetrics:
     def test_opposite_bid_spikes_above_threshold(self) -> None:
         """Opposite bid spikes above threshold should trigger warning."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)
         result = _make_result(1234567890, "DOWN", Decimal("0.96"), Decimal("-4.8"))
 
         # Opposite (UP) bid spikes
         snapshots = [
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.12"), Decimal("0.14")),  # Spike!
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.85"), Decimal("0.88")),
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=10), Decimal("0.12"), Decimal("0.14")),  # Spike!
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=10), Decimal("0.85"), Decimal("0.88")),
         ]
 
         thresholds = StabilityThresholds(opposite_bid_warn=Decimal("0.10"))
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.result == "LOSS"
@@ -160,20 +166,21 @@ class TestComputeStabilityMetrics:
     def test_leader_ask_drops_below_threshold(self) -> None:
         """Leader ask drops below threshold should trigger warning."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("-5.0"))
 
         # Leader ask crashes
         snapshots = [
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.90"), Decimal("0.92")),  # Crash!
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.06"), Decimal("0.08")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=10), Decimal("0.90"), Decimal("0.92")),  # Crash!
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=10), Decimal("0.06"), Decimal("0.08")),
         ]
 
         thresholds = StabilityThresholds(leader_ask_warn=Decimal("0.93"))
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.result == "LOSS"
@@ -184,20 +191,21 @@ class TestComputeStabilityMetrics:
     def test_drawdown_triggers_warning(self) -> None:
         """Large drawdown should trigger warning."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("-5.0"))
 
         # Leader bid drops significantly (drawdown >= 0.06)
         snapshots = [
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.89"), Decimal("0.91")),  # 0.96 - 0.89 = 0.07
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=10), Decimal("0.89"), Decimal("0.91")),  # 0.96 - 0.89 = 0.07
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
         ]
 
         thresholds = StabilityThresholds(drawdown_warn=Decimal("0.06"))
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.result == "LOSS"
@@ -207,38 +215,40 @@ class TestComputeStabilityMetrics:
     def test_first_instability_is_earliest(self) -> None:
         """first_instability_ts should be the earliest trigger."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("-5.0"))
 
         # Multiple instabilities at different times
         snapshots = [
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.11"), Decimal("0.13")),  # First!
-            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=20), Decimal("0.88"), Decimal("0.90")),  # Later
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-down-456", entry_fill_ts + timedelta(seconds=10), Decimal("0.11"), Decimal("0.13")),  # First!
+            _make_snapshot("token-up-123", entry_fill_ts + timedelta(seconds=20), Decimal("0.88"), Decimal("0.90")),  # Later
         ]
 
         thresholds = StabilityThresholds(opposite_bid_warn=Decimal("0.10"), leader_bid_warn=Decimal("0.90"))
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.book_flip_warning is True
-        assert metrics.first_instability_ts == entry_ts + timedelta(seconds=10)
+        assert metrics.first_instability_ts == entry_fill_ts + timedelta(seconds=10)
         assert metrics.seconds_after_entry_to_instability is not None
-        assert abs(metrics.seconds_after_entry_to_instability - 10.0) < 0.1  # Exactly 10s after entry
+        assert abs(metrics.seconds_after_entry_to_instability - 10.0) < 0.1  # Exactly 10s after fill
 
     def test_no_post_entry_snapshots_handled_safely(self) -> None:
         """Empty post_entry_snapshots should be handled without crashing."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_ts = window_end - timedelta(seconds=60)
+        entry_decision_ts = window_end - timedelta(seconds=60)
+        entry_fill_ts = window_end - timedelta(seconds=57)
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("4.5"))
 
         snapshots: list[BookSnapshot] = []
         thresholds = StabilityThresholds()
         metrics = _compute_stability_metrics(
             result, window_end, snapshots, thresholds,
-            entry_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
         assert metrics.round_no == 1234567890
@@ -417,8 +427,11 @@ class TestSlottedDataclass:
         # Create a sample metrics object
         metrics = BookStabilityMetrics(
             round_no=123,
-            entry_ts=datetime(2026, 7, 8, 14, 14, 0, tzinfo=timezone.utc),
-            time_left_entry=60.0,
+            entry_decision_ts=datetime(2026, 7, 8, 14, 14, 0, tzinfo=timezone.utc),
+            entry_fill_ts=datetime(2026, 7, 8, 14, 14, 3, tzinfo=timezone.utc),
+            decision_time_left=60.0,
+            fill_time_left=57.0,
+            decision_to_fill_seconds=3.0,
             side_taken="UP",
             resolved_outcome="",
             result="WIN",
@@ -464,8 +477,11 @@ class TestSlottedDataclass:
         # Create a sample metrics object
         original = BookStabilityMetrics(
             round_no=123,
-            entry_ts=datetime(2026, 7, 8, 14, 14, 0, tzinfo=timezone.utc),
-            time_left_entry=60.0,
+            entry_decision_ts=datetime(2026, 7, 8, 14, 14, 0, tzinfo=timezone.utc),
+            entry_fill_ts=datetime(2026, 7, 8, 14, 14, 3, tzinfo=timezone.utc),
+            decision_time_left=60.0,
+            fill_time_left=57.0,
+            decision_to_fill_seconds=3.0,
             side_taken="UP",
             resolved_outcome="",  # Initially empty
             result="WIN",
@@ -617,10 +633,15 @@ class TestExactEntryTiming:
         assert result is not None
         assert obs.classification == "FILLED"
         
-        # Verify exact entry_fill_ts is exposed
+        # Verify both exact timestamps are exposed
+        assert obs.entry_decision_ts is not None
         assert obs.entry_fill_ts is not None
         assert obs.entry_fill_ts == exec_tick_ts, \
             f"Expected entry_fill_ts={exec_tick_ts}, got {obs.entry_fill_ts}"
+        assert obs.entry_decision_ts == decision_tick_ts, \
+            f"Expected entry_decision_ts={decision_tick_ts}, got {obs.entry_decision_ts}"
+        # Verify fill happened after decision (latency)
+        assert obs.entry_fill_ts > obs.entry_decision_ts
 
     async def test_run_diagnostics_uses_exact_entry_fill_ts_not_signals(self) -> None:
         """run_diagnostics must use exact entry_fill_ts from RoundObservation, not approximate from signals."""
@@ -672,8 +693,9 @@ class TestExactEntryTiming:
 
         thresholds = StabilityThresholds()
 
-        # Create mock round and observation with exact entry_fill_ts
+        # Create mock round and observation with exact entry timestamps
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
+        exact_entry_decision_ts = window_end - timedelta(seconds=60)  # Exact decision timestamp
         exact_entry_fill_ts = window_end - timedelta(seconds=57.3)  # Exact fill timestamp
         
         mock_round = MagicMock()
@@ -691,7 +713,8 @@ class TestExactEntryTiming:
         mock_result.balance_after = Decimal("504.5")
 
         mock_obs = MagicMock()
-        mock_obs.entry_fill_ts = exact_entry_fill_ts  # Exact timestamp from replay
+        mock_obs.entry_decision_ts = exact_entry_decision_ts  # Exact decision timestamp
+        mock_obs.entry_fill_ts = exact_entry_fill_ts  # Exact fill timestamp
 
         # Mock load_round_replays to yield one round
         async def mock_load():
@@ -732,7 +755,8 @@ class TestExactEntryTiming:
 
         # Setup
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
-        entry_fill_ts = window_end - timedelta(seconds=55)  # Entry at 55s before end
+        entry_decision_ts = window_end - timedelta(seconds=58)  # Decision at 58s before end
+        entry_fill_ts = window_end - timedelta(seconds=55)  # Fill at 55s before end (3s latency)
         
         result = RoundResult(
             round_no=123,
@@ -750,14 +774,16 @@ class TestExactEntryTiming:
         # Compute metrics
         metrics = _compute_stability_metrics(
             result, window_end, [], thresholds,
-            entry_fill_ts, "token-up-123", "token-down-456"
+            entry_decision_ts, entry_fill_ts, "token-up-123", "token-down-456"
         )
 
-        # Verify time_left_entry is correct (55s)
-        assert metrics.time_left_entry == 55.0
-        # For t_entry_sec=60, this entry at 55s is normal (within window)
-        assert metrics.time_left_entry <= 60.0, \
-            "time_left_entry should not exceed configured t_entry_sec=60"
+        # Verify timing metrics
+        assert metrics.decision_time_left == 58.0
+        assert metrics.fill_time_left == 55.0
+        assert metrics.decision_to_fill_seconds == 3.0
+        # For t_entry_sec=60, decision at 58s is normal (within window)
+        assert metrics.decision_time_left <= 60.0, \
+            "decision_time_left should not exceed configured t_entry_sec=60 for normal entry"
 
     async def test_diagnostic_fails_closed_if_no_entry_fill_ts(self) -> None:
         """Diagnostic must raise RuntimeError if entry occurred but no entry_fill_ts available."""
@@ -816,7 +842,8 @@ class TestExactEntryTiming:
         mock_result.round_no = 1234567890
 
         mock_obs = MagicMock()
-        mock_obs.entry_fill_ts = None  # BUG: entry occurred but no timestamp!
+        mock_obs.entry_decision_ts = None  # BUG: entry occurred but no decision timestamp!
+        mock_obs.entry_fill_ts = None  # BUG: entry occurred but no fill timestamp!
 
         async def mock_load():
             yield mock_round, []
@@ -829,7 +856,7 @@ class TestExactEntryTiming:
             MockEngine.return_value = mock_engine_instance
 
             # Should raise RuntimeError (fail closed)
-            with pytest.raises(RuntimeError, match="entry occurred but no entry_fill_ts"):
+            with pytest.raises(RuntimeError, match="entry occurred but missing entry_decision_ts"):
                 await run_diagnostics(
                     mock_store,
                     config,

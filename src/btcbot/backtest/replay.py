@@ -515,8 +515,9 @@ class RoundObservation:
     sizing_binding: dict[str, int] = field(default_factory=_new_sizing_binding)
     sizing_class: dict[str, int] = field(default_factory=_new_sizing_class)
     sizing_samples: tuple[SizingDiagnostic, ...] = ()
-    # Entry timing (exact fill timestamp for post-entry diagnostics; None if no entry).
-    entry_fill_ts: datetime | None = None
+    # Entry timing (exact timestamps for decision-to-fill latency diagnostics; None if no entry).
+    entry_decision_ts: datetime | None = None  # tick when EnterOrder emitted
+    entry_fill_ts: datetime | None = None  # tick when fill occurred
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,6 +684,8 @@ class _RoundLedger:
         self.sizing_binding: dict[str, int] = _new_sizing_binding()
         self.sizing_class: dict[str, int] = _new_sizing_class()
         self.sizing_samples: list[SizingDiagnostic] = []
+        # --- exact entry timing (observability murni; decision + fill timestamps) ---
+        self.entry_decision_ts: datetime | None = None  # tick when EnterOrder was emitted
 
     @property
     def entered(self) -> bool:
@@ -752,7 +755,8 @@ class ReplayEngine:
         angka PnL/keputusan).
         """
         if rnd.resolved_outcome is None or not ticks:
-            return None, None, RoundObservation(ROUND_NO_SIGNAL, 0, 0, 0, entry_fill_ts=None)
+            return None, None, RoundObservation(ROUND_NO_SIGNAL, 0, 0, 0, 
+                                                entry_decision_ts=None, entry_fill_ts=None)
 
         clock = SimClock(ticks[0].ts)
         ledger = _RoundLedger()
@@ -780,7 +784,8 @@ class ReplayEngine:
                     entry_reasons[ENTRY_REASON_ENTER] += 1  # G2: lolos semua gerbang
                     ledger.enter_orders_yielded += 1  # R-A1: sinyal terbentuk
                     self._exec_entry(
-                        decision, signal, rnd, mbook, exec_tick, ledger, limits, bankroll
+                        decision, signal, rnd, mbook, exec_tick, ledger, limits, bankroll,
+                        decision_ts=tick.ts,  # Capture exact decision timestamp
                     )
                 elif isinstance(decision, NoOp) and decision.reason in _ENTRY_NOOP_REASONS:
                     entry_reasons[decision.reason] += 1  # G2: alasan gerbang entry
@@ -818,7 +823,10 @@ class ReplayEngine:
             classification = ROUND_SIGNAL_NO_FILL
         else:
             classification = ROUND_NO_SIGNAL
-        # Extract exact entry fill timestamp from first fill (entry always creates first fill).
+        # Extract exact entry decision and fill timestamps from ledger.
+        # entry_decision_ts: tick when successful EnterOrder was emitted.
+        # entry_fill_ts: tick when that order was actually filled (after latency).
+        entry_decision_ts = ledger.entry_decision_ts if ledger.entered else None
         entry_fill_ts = ledger.fills[0].ts if ledger.fills else None
         return RoundObservation(
             classification=classification,
@@ -830,6 +838,7 @@ class ReplayEngine:
             sizing_binding=ledger.sizing_binding,
             sizing_class=ledger.sizing_class,
             sizing_samples=tuple(ledger.sizing_samples),
+            entry_decision_ts=entry_decision_ts,
             entry_fill_ts=entry_fill_ts,
         )
 
@@ -924,6 +933,8 @@ class ReplayEngine:
         ledger: _RoundLedger,
         limits: SizingLimits,
         bankroll: Decimal,
+        *,
+        decision_ts: datetime,
     ) -> None:
         leader = Outcome(decision.outcome)
         decision_book = mbook.for_outcome(leader)
@@ -966,6 +977,8 @@ class ReplayEngine:
                 ledger.fok_rejected_empty_book += 1
             return
         ledger.entry_fills += 1  # R-A4: fills_total (entry sukses)
+        # Record exact decision timestamp (observability only; tick when EnterOrder emitted).
+        ledger.entry_decision_ts = decision_ts
         fee = self._fee(fr.avg_price, fr.filled_size)
         ledger.cash -= fr.notional + fee
         ledger.holdings[decision.token_id] = (
