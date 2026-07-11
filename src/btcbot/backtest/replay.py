@@ -23,6 +23,7 @@ reproducibility bila opsi stokastik ditambah kemudian.
 
 from __future__ import annotations
 
+import bisect
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -608,6 +609,105 @@ def select_execution_tick(
         )
 
 
+def _select_execution_tick_fast(
+    ticks: Sequence[ReplayTick],
+    decision_index: int,
+    *,
+    latency_mode: str,
+    latency_ticks: int,
+    latency_ms: int,
+) -> ExecutionSelection:
+    """Performance-optimized selector for repeated calls (validation already done).
+    
+    INTERNAL USE ONLY by ReplayEngine after once-per-round validation.
+    Skips full-sequence validation for O(1) tick mode and O(log n) time mode.
+    
+    SAFETY: Caller MUST ensure ticks already validated (non-empty, UTC-aware, sorted).
+    """
+    n = len(ticks)
+    decision_ts = ticks[decision_index].ts
+    
+    if latency_mode == "ticks":
+        requested_index = decision_index + latency_ticks
+        actual_index = min(requested_index, n - 1)
+        tick_clamped = requested_index >= n
+        actual_ts = ticks[actual_index].ts
+        realized_latency_ms = (actual_ts - decision_ts).total_seconds() * 1000
+        
+        return ExecutionSelection(
+            latency_mode="ticks",
+            decision_tick_index=decision_index,
+            requested_execution_tick_index=requested_index,
+            requested_execution_ts=None,
+            actual_execution_tick_index=actual_index,
+            actual_execution_ts=actual_ts,
+            tick_clamped=tick_clamped,
+            no_future_tick=False,
+            configured_latency_ticks=latency_ticks,
+            configured_latency_ms=None,
+            realized_latency_ms=realized_latency_ms,
+            execution_overshoot_ms=None,
+        )
+    
+    else:  # latency_mode == "time"
+        requested_ts = decision_ts + timedelta(milliseconds=latency_ms)
+        
+        # Binary search: find leftmost i >= decision_index where ticks[i].ts >= requested_ts
+        # Convert timestamps to comparable key for bisect
+        search_slice = ticks[decision_index:]
+        search_timestamps = [t.ts for t in search_slice]
+        
+        # bisect_left finds insertion point; we want first tick >= requested_ts
+        pos = bisect.bisect_left(search_timestamps, requested_ts)
+        # If exact match or later tick found
+        if pos < len(search_slice):
+            # Check if this tick is actually >= requested_ts (bisect_left finds insertion point)
+            if search_slice[pos].ts >= requested_ts:
+                actual_index = decision_index + pos
+            elif pos + 1 < len(search_slice):
+                actual_index = decision_index + pos + 1
+            else:
+                actual_index = None
+        else:
+            actual_index = None
+        
+        if actual_index is None:
+            # No tick at or after requested_ts
+            return ExecutionSelection(
+                latency_mode="time",
+                decision_tick_index=decision_index,
+                requested_execution_tick_index=None,
+                requested_execution_ts=requested_ts,
+                actual_execution_tick_index=None,
+                actual_execution_ts=None,
+                tick_clamped=False,
+                no_future_tick=True,
+                configured_latency_ticks=None,
+                configured_latency_ms=latency_ms,
+                realized_latency_ms=None,
+                execution_overshoot_ms=None,
+            )
+        
+        actual_ts = ticks[actual_index].ts
+        realized_latency_ms = (actual_ts - decision_ts).total_seconds() * 1000
+        overshoot_ms = (actual_ts - requested_ts).total_seconds() * 1000
+        
+        return ExecutionSelection(
+            latency_mode="time",
+            decision_tick_index=decision_index,
+            requested_execution_tick_index=None,
+            requested_execution_ts=requested_ts,
+            actual_execution_tick_index=actual_index,
+            actual_execution_ts=actual_ts,
+            tick_clamped=False,
+            no_future_tick=False,
+            configured_latency_ticks=None,
+            configured_latency_ms=latency_ms,
+            realized_latency_ms=realized_latency_ms,
+            execution_overshoot_ms=overshoot_ms,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayConfig:
     """Konfigurasi replay (sizing, fill model, vol, seed)."""
@@ -704,6 +804,18 @@ class RoundObservation:
     requested_entry_execution_tick_index: int | None = None  # decision_index + latency_ticks
     actual_entry_execution_tick_index: int | None = None  # min(requested, n-1)
     entry_execution_clamped: bool | None = None  # requested >= n
+    # Latency configuration (Sub-Task 2; None if no entry).
+    latency_mode: str | None = None  # "ticks" | "time"
+    configured_latency_ticks: int | None = None  # tick mode config
+    configured_latency_ms: int | None = None  # time mode config
+    requested_entry_execution_ts: datetime | None = None  # time mode: decision_ts + latency_ms
+    realized_entry_latency_ms: float | None = None  # actual_ts - decision_ts
+    entry_execution_overshoot_ms: float | None = None  # time mode: actual_ts - requested_ts
+    successful_entry_limit_price: Decimal | None = None  # EnterOrder limit price (when filled)
+    # No-future-tick counters (Sub-Task 2; time mode only).
+    no_future_tick_entry_attempts: int = 0
+    no_future_tick_hedge_attempts: int = 0
+    no_future_tick_exit_attempts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,6 +854,10 @@ class ReplaySummary:
     depth_available_stats: SizingStat = field(default_factory=SizingStat)
     depth_ratio_buckets: dict[str, int] = field(default_factory=_new_ratio_buckets)
     raw_ratio_buckets: dict[str, int] = field(default_factory=_new_ratio_buckets)
+    # No-future-tick counters (Sub-Task 2; time mode only).
+    no_future_tick_entry_attempts: int = 0
+    no_future_tick_hedge_attempts: int = 0
+    no_future_tick_exit_attempts: int = 0
 
     @property
     def signal_no_fill_rate(self) -> Decimal:
@@ -777,6 +893,10 @@ class _ObsTally:
         self.depth_available_stats = _StreamStats()
         self.depth_ratio_buckets: dict[str, int] = _new_ratio_buckets()
         self.raw_ratio_buckets: dict[str, int] = _new_ratio_buckets()
+        # --- no-future-tick counters (Sub-Task 2) ---
+        self.no_future_tick_entry_attempts = 0
+        self.no_future_tick_hedge_attempts = 0
+        self.no_future_tick_exit_attempts = 0
 
     def add(self, obs: RoundObservation) -> None:
         """Roll-up satu observasi ronde."""
@@ -809,6 +929,10 @@ class _ObsTally:
             if sd.min_order_size > _ZERO:
                 self.depth_ratio_buckets[_ratio_bucket(sd.depth_available / sd.min_order_size)] += 1
                 self.raw_ratio_buckets[_ratio_bucket(sd.raw_size / sd.min_order_size)] += 1
+        # Sub-Task 2: aggregate no-future-tick counters
+        self.no_future_tick_entry_attempts += obs.no_future_tick_entry_attempts
+        self.no_future_tick_hedge_attempts += obs.no_future_tick_hedge_attempts
+        self.no_future_tick_exit_attempts += obs.no_future_tick_exit_attempts
 
     def as_kwargs(self) -> dict[str, int]:
         """Field observability int untuk konstruksi :class:`ReplaySummary`."""
@@ -819,6 +943,9 @@ class _ObsTally:
             "enter_orders_yielded": self.enter_orders_yielded,
             "fills_total": self.fills_total,
             "fok_rejected_empty_book": self.fok_rejected_empty_book,
+            "no_future_tick_entry_attempts": self.no_future_tick_entry_attempts,
+            "no_future_tick_hedge_attempts": self.no_future_tick_hedge_attempts,
+            "no_future_tick_exit_attempts": self.no_future_tick_exit_attempts,
         }
 
     def entry_counts(self) -> dict[str, int]:
@@ -877,6 +1004,18 @@ class _RoundLedger:
         self.requested_entry_execution_tick_index: int | None = None
         self.actual_entry_execution_tick_index: int | None = None
         self.entry_execution_clamped: bool | None = None
+        # --- Sub-Task 2: latency observability ---
+        self.latency_mode: str | None = None
+        self.configured_latency_ticks: int | None = None
+        self.configured_latency_ms: int | None = None
+        self.requested_entry_execution_ts: datetime | None = None
+        self.realized_entry_latency_ms: float | None = None
+        self.entry_execution_overshoot_ms: float | None = None
+        self.successful_entry_limit_price: Decimal | None = None
+        # --- no-future-tick counters (Sub-Task 2; time mode only) ---
+        self.no_future_tick_entry_attempts: int = 0
+        self.no_future_tick_hedge_attempts: int = 0
+        self.no_future_tick_exit_attempts: int = 0
 
     @property
     def entered(self) -> bool:
@@ -956,10 +1095,19 @@ class ReplayEngine:
                 entry_execution_clamped=None,
             )
 
+        # Sub-Task 2: Validate ticks ONCE at start to avoid O(n²) for repeated selector calls
+        n = len(ticks)
+        if ticks[0].ts.tzinfo is None:
+            raise ValueError(f"Round {rnd.round_no}: tick 0 has naive timestamp (must be UTC-aware)")
+        for i in range(1, n):
+            if ticks[i].ts.tzinfo is None:
+                raise ValueError(f"Round {rnd.round_no}: tick {i} has naive timestamp (must be UTC-aware)")
+            if ticks[i].ts < ticks[i - 1].ts:
+                raise ValueError(f"Round {rnd.round_no}: ticks not sorted at index {i}")
+
         clock = SimClock(ticks[0].ts)
         ledger = _RoundLedger()
         limits = self._round_limits(rnd)
-        n = len(ticks)
         closed_early = False
         entry_reasons = _new_entry_reasons()
 
@@ -975,33 +1123,54 @@ class ReplayEngine:
                 book_down=tick.book_down,
             )
             position = self._current_position(rnd, ledger)
-            exec_tick = ticks[min(i + self._cfg.latency_ticks, n - 1)]
 
             for decision in self._strategy.on_tick(signal, mbook, position):
                 if isinstance(decision, EnterOrder):
                     entry_reasons[ENTRY_REASON_ENTER] += 1  # G2: lolos semua gerbang
                     ledger.enter_orders_yielded += 1  # R-A1: sinyal terbentuk
-                    # Compute exact tick indices for latency audit correctness
-                    decision_tick_index = i
-                    requested_execution_tick_index = i + self._cfg.latency_ticks
-                    actual_execution_tick_index = min(requested_execution_tick_index, n - 1)
-                    execution_clamped = requested_execution_tick_index >= n
+                    # Sub-Task 2: Use fast selector (ticks already validated)
+                    exec_sel = _select_execution_tick_fast(
+                        ticks,
+                        i,
+                        latency_mode=self._cfg.latency_mode,
+                        latency_ticks=self._cfg.latency_ticks,
+                        latency_ms=self._cfg.latency_ms,
+                    )
+                    if exec_sel.no_future_tick:
+                        ledger.no_future_tick_entry_attempts += 1
+                        continue  # Skip this attempt; no fill possible
                     self._exec_entry(
-                        decision, signal, rnd, mbook, exec_tick, ledger, limits, bankroll,
-                        decision_ts=tick.ts,
-                        decision_tick_index=decision_tick_index,
-                        requested_execution_tick_index=requested_execution_tick_index,
-                        actual_execution_tick_index=actual_execution_tick_index,
-                        execution_clamped=execution_clamped,
+                        decision, signal, rnd, mbook, ticks, exec_sel, ledger, limits, bankroll,
                     )
                 elif isinstance(decision, NoOp) and decision.reason in _ENTRY_NOOP_REASONS:
                     entry_reasons[decision.reason] += 1  # G2: alasan gerbang entry
                 elif isinstance(decision, Hedge):
-                    self._exec_hedge(decision, rnd, exec_tick, ledger, limits)
-                elif isinstance(decision, Exit) and self._exec_exit(
-                    decision, rnd, exec_tick, ledger
-                ):
-                    closed_early = True
+                    # Sub-Task 2: Use selector for hedge
+                    exec_sel = _select_execution_tick_fast(
+                        ticks,
+                        i,
+                        latency_mode=self._cfg.latency_mode,
+                        latency_ticks=self._cfg.latency_ticks,
+                        latency_ms=self._cfg.latency_ms,
+                    )
+                    if exec_sel.no_future_tick:
+                        ledger.no_future_tick_hedge_attempts += 1
+                        continue
+                    self._exec_hedge(decision, rnd, ticks, exec_sel, ledger, limits)
+                elif isinstance(decision, Exit):
+                    # Sub-Task 2: Use selector for exit
+                    exec_sel = _select_execution_tick_fast(
+                        ticks,
+                        i,
+                        latency_mode=self._cfg.latency_mode,
+                        latency_ticks=self._cfg.latency_ticks,
+                        latency_ms=self._cfg.latency_ms,
+                    )
+                    if exec_sel.no_future_tick:
+                        ledger.no_future_tick_exit_attempts += 1
+                        continue
+                    if self._exec_exit(decision, rnd, ticks, exec_sel, ledger):
+                        closed_early = True
             if closed_early:
                 break
 
@@ -1040,6 +1209,14 @@ class ReplayEngine:
         requested_entry_execution_tick_index = ledger.requested_entry_execution_tick_index if ledger.entered else None
         actual_entry_execution_tick_index = ledger.actual_entry_execution_tick_index if ledger.entered else None
         entry_execution_clamped = ledger.entry_execution_clamped if ledger.entered else None
+        # Sub-Task 2: Extract latency observability
+        latency_mode = ledger.latency_mode if ledger.entered else None
+        configured_latency_ticks = ledger.configured_latency_ticks if ledger.entered else None
+        configured_latency_ms = ledger.configured_latency_ms if ledger.entered else None
+        requested_entry_execution_ts = ledger.requested_entry_execution_ts if ledger.entered else None
+        realized_entry_latency_ms = ledger.realized_entry_latency_ms if ledger.entered else None
+        entry_execution_overshoot_ms = ledger.entry_execution_overshoot_ms if ledger.entered else None
+        successful_entry_limit_price = ledger.successful_entry_limit_price if ledger.entered else None
         return RoundObservation(
             classification=classification,
             enter_orders_yielded=ledger.enter_orders_yielded,
@@ -1056,6 +1233,16 @@ class ReplayEngine:
             requested_entry_execution_tick_index=requested_entry_execution_tick_index,
             actual_entry_execution_tick_index=actual_entry_execution_tick_index,
             entry_execution_clamped=entry_execution_clamped,
+            latency_mode=latency_mode,
+            configured_latency_ticks=configured_latency_ticks,
+            configured_latency_ms=configured_latency_ms,
+            requested_entry_execution_ts=requested_entry_execution_ts,
+            realized_entry_latency_ms=realized_entry_latency_ms,
+            entry_execution_overshoot_ms=entry_execution_overshoot_ms,
+            successful_entry_limit_price=successful_entry_limit_price,
+            no_future_tick_entry_attempts=ledger.no_future_tick_entry_attempts,
+            no_future_tick_hedge_attempts=ledger.no_future_tick_hedge_attempts,
+            no_future_tick_exit_attempts=ledger.no_future_tick_exit_attempts,
         )
 
     def run(
@@ -1145,16 +1332,11 @@ class ReplayEngine:
         signal: Signal,
         rnd: Round,
         mbook: MarketBook,
-        exec_tick: ReplayTick,
+        ticks: Sequence[ReplayTick],
+        exec_sel: ExecutionSelection,
         ledger: _RoundLedger,
         limits: SizingLimits,
         bankroll: Decimal,
-        *,
-        decision_ts: datetime,
-        decision_tick_index: int,
-        requested_execution_tick_index: int,
-        actual_execution_tick_index: int,
-        execution_clamped: bool,
     ) -> None:
         leader = Outcome(decision.outcome)
         decision_book = mbook.for_outcome(leader)
@@ -1168,6 +1350,11 @@ class ReplayEngine:
         if sized <= _ZERO:
             ledger.fill_failures[FILL_FAIL_REQUESTED_SIZE_ZERO] += 1  # G3
             return
+        
+        # Sub-Task 2: Get execution tick from selector result
+        assert exec_sel.actual_execution_tick_index is not None, "no_future_tick should be handled before _exec_entry"
+        exec_tick = ticks[exec_sel.actual_execution_tick_index]
+        
         exec_book = exec_tick.book_up if leader is Outcome.UP else exec_tick.book_down
         fr = simulate_fill(
             book=exec_book,
@@ -1198,12 +1385,21 @@ class ReplayEngine:
             return
         ledger.entry_fills += 1  # R-A4: fills_total (entry sukses)
         # Record exact decision timestamp (observability only; tick when EnterOrder emitted).
-        ledger.entry_decision_ts = decision_ts
+        decision_tick = ticks[exec_sel.decision_tick_index]
+        ledger.entry_decision_ts = decision_tick.ts
         # Record exact tick indices (observability only; latency audit correctness).
-        ledger.entry_decision_tick_index = decision_tick_index
-        ledger.requested_entry_execution_tick_index = requested_execution_tick_index
-        ledger.actual_entry_execution_tick_index = actual_execution_tick_index
-        ledger.entry_execution_clamped = execution_clamped
+        ledger.entry_decision_tick_index = exec_sel.decision_tick_index
+        ledger.requested_entry_execution_tick_index = exec_sel.requested_execution_tick_index
+        ledger.actual_entry_execution_tick_index = exec_sel.actual_execution_tick_index
+        ledger.entry_execution_clamped = exec_sel.tick_clamped
+        # Sub-Task 2: Record latency observability
+        ledger.latency_mode = exec_sel.latency_mode
+        ledger.configured_latency_ticks = exec_sel.configured_latency_ticks
+        ledger.configured_latency_ms = exec_sel.configured_latency_ms
+        ledger.requested_entry_execution_ts = exec_sel.requested_execution_ts
+        ledger.realized_entry_latency_ms = exec_sel.realized_latency_ms
+        ledger.entry_execution_overshoot_ms = exec_sel.execution_overshoot_ms
+        ledger.successful_entry_limit_price = decision.price  # Capture EnterOrder limit price exactly
         fee = self._fee(fr.avg_price, fr.filled_size)
         ledger.cash -= fr.notional + fee
         ledger.holdings[decision.token_id] = (
@@ -1229,10 +1425,14 @@ class ReplayEngine:
         self,
         decision: Hedge,
         rnd: Round,
-        exec_tick: ReplayTick,
+        ticks: Sequence[ReplayTick],
+        exec_sel: ExecutionSelection,
         ledger: _RoundLedger,
         limits: SizingLimits,
     ) -> None:
+        assert exec_sel.actual_execution_tick_index is not None, "no_future_tick should be handled before _exec_hedge"
+        exec_tick = ticks[exec_sel.actual_execution_tick_index]
+        
         opp = Outcome(decision.outcome)
         exec_book = exec_tick.book_up if opp is Outcome.UP else exec_tick.book_down
         pos_size = ledger.holdings.get(ledger.entry_token or "", _ZERO)
@@ -1273,9 +1473,13 @@ class ReplayEngine:
         self,
         decision: Exit,
         rnd: Round,
-        exec_tick: ReplayTick,
+        ticks: Sequence[ReplayTick],
+        exec_sel: ExecutionSelection,
         ledger: _RoundLedger,
     ) -> bool:
+        assert exec_sel.actual_execution_tick_index is not None, "no_future_tick should be handled before _exec_exit"
+        exec_tick = ticks[exec_sel.actual_execution_tick_index]
+        
         held = Outcome(decision.outcome)
         exec_book = exec_tick.book_up if held is Outcome.UP else exec_tick.book_down
         qty = ledger.holdings.get(decision.token_id, _ZERO)
