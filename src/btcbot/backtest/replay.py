@@ -611,6 +611,7 @@ def select_execution_tick(
 
 def _select_execution_tick_fast(
     ticks: Sequence[ReplayTick],
+    tick_timestamps: tuple[datetime, ...],
     decision_index: int,
     *,
     latency_mode: str,
@@ -622,7 +623,12 @@ def _select_execution_tick_fast(
     INTERNAL USE ONLY by ReplayEngine after once-per-round validation.
     Skips full-sequence validation for O(1) tick mode and O(log n) time mode.
     
-    SAFETY: Caller MUST ensure ticks already validated (non-empty, UTC-aware, sorted).
+    CRITICAL: tick_timestamps MUST be precomputed once per round and reused for
+    all decisions to avoid O(n²) behavior. Uses bisect directly on precomputed
+    timestamps with lo= parameter (NO per-decision slicing or list construction).
+    
+    SAFETY: Caller MUST ensure ticks already validated (non-empty, UTC-aware, sorted)
+    and tick_timestamps extracted once.
     """
     n = len(ticks)
     decision_ts = ticks[decision_index].ts
@@ -652,26 +658,11 @@ def _select_execution_tick_fast(
     else:  # latency_mode == "time"
         requested_ts = decision_ts + timedelta(milliseconds=latency_ms)
         
-        # Binary search: find leftmost i >= decision_index where ticks[i].ts >= requested_ts
-        # Convert timestamps to comparable key for bisect
-        search_slice = ticks[decision_index:]
-        search_timestamps = [t.ts for t in search_slice]
+        # TRUE O(log n): bisect directly on precomputed timestamps with lo= parameter
+        # NO slicing, NO per-decision list construction
+        actual_index = bisect.bisect_left(tick_timestamps, requested_ts, lo=decision_index)
         
-        # bisect_left finds insertion point; we want first tick >= requested_ts
-        pos = bisect.bisect_left(search_timestamps, requested_ts)
-        # If exact match or later tick found
-        if pos < len(search_slice):
-            # Check if this tick is actually >= requested_ts (bisect_left finds insertion point)
-            if search_slice[pos].ts >= requested_ts:
-                actual_index = decision_index + pos
-            elif pos + 1 < len(search_slice):
-                actual_index = decision_index + pos + 1
-            else:
-                actual_index = None
-        else:
-            actual_index = None
-        
-        if actual_index is None:
+        if actual_index >= n:
             # No tick at or after requested_ts
             return ExecutionSelection(
                 latency_mode="time",
@@ -1095,7 +1086,8 @@ class ReplayEngine:
                 entry_execution_clamped=None,
             )
 
-        # Sub-Task 2: Validate ticks ONCE at start to avoid O(n²) for repeated selector calls
+        # Sub-Task 2 CORRECTION: Validate ticks ONCE and build timestamp sequence ONCE
+        # to avoid O(n²). Precomputed tick_timestamps reused for all decisions.
         n = len(ticks)
         if ticks[0].ts.tzinfo is None:
             raise ValueError(f"Round {rnd.round_no}: tick 0 has naive timestamp (must be UTC-aware)")
@@ -1104,6 +1096,9 @@ class ReplayEngine:
                 raise ValueError(f"Round {rnd.round_no}: tick {i} has naive timestamp (must be UTC-aware)")
             if ticks[i].ts < ticks[i - 1].ts:
                 raise ValueError(f"Round {rnd.round_no}: ticks not sorted at index {i}")
+        
+        # Build timestamp sequence ONCE for O(log n) bisect (NO per-decision reconstruction)
+        tick_timestamps = tuple(t.ts for t in ticks)
 
         clock = SimClock(ticks[0].ts)
         ledger = _RoundLedger()
@@ -1128,9 +1123,10 @@ class ReplayEngine:
                 if isinstance(decision, EnterOrder):
                     entry_reasons[ENTRY_REASON_ENTER] += 1  # G2: lolos semua gerbang
                     ledger.enter_orders_yielded += 1  # R-A1: sinyal terbentuk
-                    # Sub-Task 2: Use fast selector (ticks already validated)
+                    # Sub-Task 2 CORRECTION: Pass precomputed tick_timestamps (NO per-decision slice/list)
                     exec_sel = _select_execution_tick_fast(
                         ticks,
+                        tick_timestamps,
                         i,
                         latency_mode=self._cfg.latency_mode,
                         latency_ticks=self._cfg.latency_ticks,
@@ -1145,9 +1141,10 @@ class ReplayEngine:
                 elif isinstance(decision, NoOp) and decision.reason in _ENTRY_NOOP_REASONS:
                     entry_reasons[decision.reason] += 1  # G2: alasan gerbang entry
                 elif isinstance(decision, Hedge):
-                    # Sub-Task 2: Use selector for hedge
+                    # Sub-Task 2 CORRECTION: Pass precomputed tick_timestamps
                     exec_sel = _select_execution_tick_fast(
                         ticks,
+                        tick_timestamps,
                         i,
                         latency_mode=self._cfg.latency_mode,
                         latency_ticks=self._cfg.latency_ticks,
@@ -1158,9 +1155,10 @@ class ReplayEngine:
                         continue
                     self._exec_hedge(decision, rnd, ticks, exec_sel, ledger, limits)
                 elif isinstance(decision, Exit):
-                    # Sub-Task 2: Use selector for exit
+                    # Sub-Task 2 CORRECTION: Pass precomputed tick_timestamps
                     exec_sel = _select_execution_tick_fast(
                         ticks,
+                        tick_timestamps,
                         i,
                         latency_mode=self._cfg.latency_mode,
                         latency_ticks=self._cfg.latency_ticks,
