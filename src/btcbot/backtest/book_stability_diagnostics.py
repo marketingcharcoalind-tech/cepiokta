@@ -11,6 +11,10 @@ G1 REVISI context: analisis5.db sole loss (round 1783520100) was a book whipsaw 
 Purpose: READ-ONLY diagnostic to answer: "Would book-instability warning have
 detected this loss, and how many winning trades would it also flag?"
 
+Entry timing: Uses EXACT fill timestamp from ReplayEngine observability
+(RoundObservation.entry_fill_ts), NOT an approximation from stored signals.
+Post-entry book snapshots are filtered: ts >= entry_fill_ts AND ts <= window_end.
+
 This is measurement only. Does NOT change strategy, replay fill logic, or create
 execution paths. Does NOT proceed to Phase 2. Read-only/observability.
 """
@@ -354,9 +358,10 @@ async def run_diagnostics(
 
     1. Stream resolved rounds + ticks using load_round_replays()
     2. Reproduce entered trades using ReplayEngine (with bankroll compounding)
-    3. For each entered trade, load post-entry book snapshots
-    4. Compute stability metrics
-    5. Aggregate into BookStabilityDiagnostics
+    3. For each entered trade, obtain EXACT entry fill timestamp from RoundObservation
+    4. Load post-entry book snapshots (ts >= entry_fill_ts, ts <= window_end)
+    5. Compute stability metrics
+    6. Aggregate into BookStabilityDiagnostics
 
     Args:
         store: Store instance
@@ -376,58 +381,50 @@ async def run_diagnostics(
     bankroll = config.starting_balance
     results_list = []
     rounds_list = []
-    signals_map: dict[int, list[object]] = {}
+    observations_list = []
 
     # Stream rounds and run replay with bankroll compounding
     async for rnd, ticks in load_round_replays(store, since=since, until=until, limit=max_rounds):
-        # Run round
+        # Run round and capture observability
         result, diag, obs = engine.observe(rnd, ticks, bankroll=bankroll)
         if result is not None:
             # Entry occurred, save for later analysis
             results_list.append(result)
             rounds_list.append(rnd)
+            observations_list.append(obs)
             bankroll = result.balance_after
-            
-            # Load signals for entry_ts approximation (same pattern as loss_diagnostics)
-            sigs = await store.get_signals(rnd.round_no)
-            if sigs:
-                signals_map[rnd.round_no] = sigs
 
     if not results_list:
         return BookStabilityDiagnostics()
 
     # For each entered trade, compute stability metrics
     diagnostics = BookStabilityDiagnostics()
-    for result, rnd in zip(results_list, rounds_list):
+    for result, rnd, obs in zip(results_list, rounds_list, observations_list):
         if rnd.window_end is None:
             continue
 
-        # Approximate entry_ts from signals (same as loss_diagnostics)
-        signals = signals_map.get(result.round_no, [])
-        if not signals:
-            continue
+        # Fail closed: entry must have exact fill timestamp from observability
+        if obs.entry_fill_ts is None:
+            # This should never happen if result is not None, but fail safely
+            raise RuntimeError(
+                f"Round {result.round_no}: entry occurred but no entry_fill_ts in observation. "
+                "This indicates a replay engine bug."
+            )
 
-        # Find signal at or near entry (time_left <= t_entry)
-        entry_signals = [s for s in signals if s.time_left_sec <= config.params.t_entry_sec]
-        if not entry_signals:
-            continue
-
-        # Use the FIRST signal that passed t_entry filter (earliest entry opportunity)
-        entry_signal = entry_signals[0]
-        entry_ts = entry_signal.ts
+        entry_fill_ts = obs.entry_fill_ts
 
         # Load book snapshots
         all_snaps = await store.get_book_snapshots(result.round_no)
-        # Filter to post-entry only (non-gap, ts >= entry_ts, ts <= window_end)
+        # Filter to post-entry only (non-gap, ts >= entry_fill_ts, ts <= window_end)
         post_entry = [
             s for s in all_snaps
-            if not s.gap and s.ts >= entry_ts and s.ts <= rnd.window_end
+            if not s.gap and s.ts >= entry_fill_ts and s.ts <= rnd.window_end
         ]
 
         # Compute metrics
         metrics = _compute_stability_metrics(
             result, rnd.window_end, post_entry, thresholds,
-            entry_ts, rnd.token_id_up, rnd.token_id_down
+            entry_fill_ts, rnd.token_id_up, rnd.token_id_down
         )
         # Fill resolved_outcome from round (use replace() for slotted dataclass)
         metrics = replace(

@@ -32,10 +32,17 @@ pursuing in Phase 2 paper simulation.
 1. **Reproduce entered trades**: Uses existing `ReplayEngine.observe()` with same parameters
    as backtest to identify which trades were entered.
 
-2. **Load post-entry book snapshots**: For each entered trade, loads `book_snapshots`
-   from entry_ts until window_end.
+2. **Extract exact entry fill timestamp**: Uses `RoundObservation.entry_fill_ts` from replay
+   observability to get the EXACT timestamp when the entry fill occurred (NOT an approximation
+   from stored signals). This is the actual simulated fill timestamp including latency.
 
-3. **Compute stability metrics**:
+3. **Load post-entry book snapshots**: For each entered trade, loads `book_snapshots`
+   from entry_fill_ts until window_end. Snapshots are filtered strictly:
+   - `ts >= entry_fill_ts` (only after fill)
+   - `ts <= window_end` (within window)
+   - `gap = False` (no data gaps)
+
+4. **Compute stability metrics**:
    - Determine leader side (side_taken) and opposite side
    - Find min/max bids/asks for leader and opposite after entry
    - Compute drawdown metrics (e.g., entry_price - min_leader_bid)
@@ -43,7 +50,7 @@ pursuing in Phase 2 paper simulation.
    - Set composite `book_flip_warning` flag if any threshold triggered
    - Find first instability timestamp
 
-4. **Aggregate and report**:
+5. **Aggregate and report**:
    - Overall summary (entries, wins, losses, PnL)
    - Statistics by side (UP/DOWN)
    - Statistics by threshold flag (True/False)
@@ -114,8 +121,8 @@ python -m btcbot.backtest.book_stability_diagnostics \
 
 ### Core Metrics (per entered trade)
 - `round_no`: Round identifier
-- `entry_ts`: Approximate entry timestamp
-- `time_left_entry`: Seconds from entry to window_end
+- `entry_ts`: **EXACT** entry fill timestamp from replay observability (NOT approximate)
+- `time_left_entry`: Seconds from entry_fill_ts to window_end
 - `side_taken`: UP/DOWN (leader side)
 - `resolved_outcome`: UP/DOWN (actual outcome)
 - `result`: WIN/LOSS

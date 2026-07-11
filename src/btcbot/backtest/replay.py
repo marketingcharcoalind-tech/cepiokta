@@ -515,6 +515,8 @@ class RoundObservation:
     sizing_binding: dict[str, int] = field(default_factory=_new_sizing_binding)
     sizing_class: dict[str, int] = field(default_factory=_new_sizing_class)
     sizing_samples: tuple[SizingDiagnostic, ...] = ()
+    # Entry timing (exact fill timestamp for post-entry diagnostics; None if no entry).
+    entry_fill_ts: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,7 +752,7 @@ class ReplayEngine:
         angka PnL/keputusan).
         """
         if rnd.resolved_outcome is None or not ticks:
-            return None, None, RoundObservation(ROUND_NO_SIGNAL, 0, 0, 0)
+            return None, None, RoundObservation(ROUND_NO_SIGNAL, 0, 0, 0, entry_fill_ts=None)
 
         clock = SimClock(ticks[0].ts)
         ledger = _RoundLedger()
@@ -816,6 +818,8 @@ class ReplayEngine:
             classification = ROUND_SIGNAL_NO_FILL
         else:
             classification = ROUND_NO_SIGNAL
+        # Extract exact entry fill timestamp from first fill (entry always creates first fill).
+        entry_fill_ts = ledger.fills[0].ts if ledger.fills else None
         return RoundObservation(
             classification=classification,
             enter_orders_yielded=ledger.enter_orders_yielded,
@@ -826,6 +830,7 @@ class ReplayEngine:
             sizing_binding=ledger.sizing_binding,
             sizing_class=ledger.sizing_class,
             sizing_samples=tuple(ledger.sizing_samples),
+            entry_fill_ts=entry_fill_ts,
         )
 
     def run(
