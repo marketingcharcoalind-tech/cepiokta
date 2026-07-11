@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -432,6 +433,182 @@ class ReplayTick:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionSelection:
+    """Result of execution tick selection for latency modeling.
+    
+    Represents the deterministic selection of an execution tick given a decision
+    tick and latency configuration. Used by both tick-based and time-based modes.
+    """
+
+    latency_mode: str  # "ticks" | "time"
+    decision_tick_index: int
+    
+    # Tick mode fields
+    requested_execution_tick_index: int | None  # decision_index + latency_ticks
+    
+    # Time mode fields
+    requested_execution_ts: datetime | None  # decision_ts + latency_ms
+    
+    # Common result fields
+    actual_execution_tick_index: int | None  # None if no_future_tick
+    actual_execution_ts: datetime | None  # None if no_future_tick
+    
+    # Status flags
+    tick_clamped: bool  # tick mode: requested >= n (clamped to final tick)
+    no_future_tick: bool  # time mode: no tick exists at or after requested_ts
+    
+    # Latency metrics
+    configured_latency_ticks: int | None  # tick mode config
+    configured_latency_ms: int | None  # time mode config
+    realized_latency_ms: float | None  # actual_ts - decision_ts (None if no execution)
+    execution_overshoot_ms: float | None  # actual_ts - requested_ts (time mode only)
+
+
+def select_execution_tick(
+    ticks: Sequence[ReplayTick],
+    decision_index: int,
+    *,
+    latency_mode: str,
+    latency_ticks: int,
+    latency_ms: int,
+) -> ExecutionSelection:
+    """Pure deterministic execution tick selector for replay latency modeling.
+    
+    Given a decision tick and latency configuration, selects the execution tick
+    according to either tick-based or time-based latency rules.
+    
+    Tick mode:
+        - requested_index = decision_index + latency_ticks
+        - actual_index = min(requested_index, n - 1)
+        - tick_clamped = requested_index >= n
+    
+    Time mode:
+        - decision_ts = ticks[decision_index].ts
+        - requested_ts = decision_ts + timedelta(milliseconds=latency_ms)
+        - select first tick where tick.ts >= requested_ts
+        - if no such tick exists: no_future_tick = True, no execution
+    
+    Args:
+        ticks: Sequence of replay ticks (must be non-empty, sorted by timestamp)
+        decision_index: Index of decision tick (must be valid: 0 <= i < len(ticks))
+        latency_mode: "ticks" or "time"
+        latency_ticks: Tick offset for tick mode (must be >= 0)
+        latency_ms: Milliseconds delay for time mode (must be >= 0)
+    
+    Returns:
+        ExecutionSelection with all computed fields
+    
+    Raises:
+        ValueError: Invalid inputs (empty ticks, invalid index, negative latency,
+                    invalid mode, naive timestamps, unsorted timestamps)
+    """
+    # Validate inputs
+    if not ticks:
+        raise ValueError("ticks must be non-empty")
+    
+    n = len(ticks)
+    if decision_index < 0 or decision_index >= n:
+        raise ValueError(
+            f"decision_index {decision_index} out of bounds [0, {n})"
+        )
+    
+    if latency_mode not in ("ticks", "time"):
+        raise ValueError(
+            f"latency_mode must be 'ticks' or 'time', got '{latency_mode}'"
+        )
+    
+    if latency_ticks < 0:
+        raise ValueError(f"latency_ticks must be >= 0, got {latency_ticks}")
+    
+    if latency_ms < 0:
+        raise ValueError(f"latency_ms must be >= 0, got {latency_ms}")
+    
+    # Validate timestamps are timezone-aware and sorted
+    for i, tick in enumerate(ticks):
+        if tick.ts.tzinfo is None:
+            raise ValueError(
+                f"tick {i} has naive timestamp {tick.ts}, all timestamps must be UTC-aware"
+            )
+        if i > 0 and tick.ts < ticks[i - 1].ts:
+            raise ValueError(
+                f"ticks not sorted: tick {i} ts={tick.ts} < tick {i-1} ts={ticks[i-1].ts}"
+            )
+    
+    decision_ts = ticks[decision_index].ts
+    
+    if latency_mode == "ticks":
+        # Tick-based mode: preserve exact historical behavior
+        requested_index = decision_index + latency_ticks
+        actual_index = min(requested_index, n - 1)
+        tick_clamped = requested_index >= n
+        
+        actual_ts = ticks[actual_index].ts
+        realized_latency_ms = (actual_ts - decision_ts).total_seconds() * 1000
+        
+        return ExecutionSelection(
+            latency_mode="ticks",
+            decision_tick_index=decision_index,
+            requested_execution_tick_index=requested_index,
+            requested_execution_ts=None,
+            actual_execution_tick_index=actual_index,
+            actual_execution_ts=actual_ts,
+            tick_clamped=tick_clamped,
+            no_future_tick=False,
+            configured_latency_ticks=latency_ticks,
+            configured_latency_ms=None,
+            realized_latency_ms=realized_latency_ms,
+            execution_overshoot_ms=None,
+        )
+    
+    else:  # latency_mode == "time"
+        # Time-based mode: select first tick at or after requested timestamp
+        requested_ts = decision_ts + timedelta(milliseconds=latency_ms)
+        
+        # Binary search for first tick at or after requested_ts
+        actual_index = None
+        for i in range(decision_index, n):
+            if ticks[i].ts >= requested_ts:
+                actual_index = i
+                break
+        
+        if actual_index is None:
+            # No future tick exists at or after requested_ts
+            return ExecutionSelection(
+                latency_mode="time",
+                decision_tick_index=decision_index,
+                requested_execution_tick_index=None,
+                requested_execution_ts=requested_ts,
+                actual_execution_tick_index=None,
+                actual_execution_ts=None,
+                tick_clamped=False,
+                no_future_tick=True,
+                configured_latency_ticks=None,
+                configured_latency_ms=latency_ms,
+                realized_latency_ms=None,
+                execution_overshoot_ms=None,
+            )
+        
+        actual_ts = ticks[actual_index].ts
+        realized_latency_ms = (actual_ts - decision_ts).total_seconds() * 1000
+        overshoot_ms = (actual_ts - requested_ts).total_seconds() * 1000
+        
+        return ExecutionSelection(
+            latency_mode="time",
+            decision_tick_index=decision_index,
+            requested_execution_tick_index=None,
+            requested_execution_ts=requested_ts,
+            actual_execution_tick_index=actual_index,
+            actual_execution_ts=actual_ts,
+            tick_clamped=False,
+            no_future_tick=False,
+            configured_latency_ticks=None,
+            configured_latency_ms=latency_ms,
+            realized_latency_ms=realized_latency_ms,
+            execution_overshoot_ms=overshoot_ms,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayConfig:
     """Konfigurasi replay (sizing, fill model, vol, seed)."""
 
@@ -440,7 +617,9 @@ class ReplayConfig:
     vol: Decimal
     starting_balance: Decimal
     fee_model: FeeModel = field(default_factory=ProportionalTakerFee)
-    latency_ticks: int = 1
+    latency_mode: str = "ticks"  # "ticks" | "time"
+    latency_ticks: int = 1  # tick mode: decision at tick t → fill at tick t+latency
+    latency_ms: int = 100  # time mode: execution delay in milliseconds
     competition_fraction: Decimal = _ZERO
     slippage_enabled: bool = True
     seed: int = 42
@@ -454,7 +633,9 @@ class ReplayConfig:
             vol=settings.backtest_vol_per_sqrt_sec,
             starting_balance=settings.paper_starting_balance,
             fee_model=ProportionalTakerFee(settings.fee_rate, settings.fee_exponent),
+            latency_mode=settings.backtest_latency_mode,
             latency_ticks=settings.backtest_latency_ticks,
+            latency_ms=settings.backtest_latency_ms,
             competition_fraction=settings.backtest_competition_fraction,
             seed=settings.backtest_seed,
         )

@@ -114,7 +114,9 @@ class Settings(BaseSettings):
 
     # --- backtest / replay (Fase 1) ---
     backtest_seed: int = 42
+    backtest_latency_mode: str = "ticks"  # "ticks" | "time"
     backtest_latency_ticks: int = 1  # keputusan di tick t → fill di tick t+latency
+    backtest_latency_ms: int = 100  # time mode: execution delay in milliseconds
     backtest_competition_fraction: Decimal = Decimal("0")  # [0,1): surplus depth saja
     backtest_vol_per_sqrt_sec: Decimal = Decimal("5")  # TODO calibrate G1 (realized vol)
 
@@ -239,6 +241,23 @@ class Settings(BaseSettings):
         """Interval poll harus > 0."""
         if v <= 0:
             raise ValueError(f"book_poll_seconds harus > 0, dapat {v}")
+        return v
+
+    @field_validator("backtest_latency_mode")
+    @classmethod
+    def _check_latency_mode(cls, v: str) -> str:
+        """Latency mode harus 'ticks' atau 'time'."""
+        if v not in ("ticks", "time"):
+            raise ValueError(f"backtest_latency_mode harus 'ticks' atau 'time', dapat '{v}'")
+        return v
+
+    @field_validator("backtest_latency_ticks", "backtest_latency_ms")
+    @classmethod
+    def _check_non_negative_latency(cls, v: int, info: object) -> int:
+        """Latency ticks dan ms tidak boleh negatif."""
+        if v < 0:
+            field_name = getattr(info, "field_name", "value")
+            raise ValueError(f"{field_name} tidak boleh negatif, dapat {v}")
         return v
 
     @field_validator(
