@@ -26,14 +26,7 @@ UP = "token_up"
 DOWN = "token_down"
 
 
-def _book(
-    token: str,
-    ts: datetime,
-    *,
-    ask: str | None,
-    bid: str | None = "0.40",
-    depth: str = "100",
-) -> OrderBook:
+def _book(token: str, ts: datetime, *, ask: str | None, bid: str | None = "0.40", depth: str = "100") -> OrderBook:
     return OrderBook(
         token_id=token,
         ts=ts,
@@ -42,15 +35,7 @@ def _book(
     )
 
 
-def _tick(
-    offset_ms: int,
-    *,
-    btc: str = "96600",
-    up_ask: str | None = "0.60",
-    down_ask: str | None = "0.20",
-    up_bid: str | None = "0.55",
-    down_bid: str | None = "0.15",
-) -> ReplayTick:
+def _tick(offset_ms: int, *, btc: str = "96600", up_ask: str | None = "0.60", down_ask: str | None = "0.20", up_bid: str | None = "0.55", down_bid: str | None = "0.15") -> ReplayTick:
     ts = WINDOW_END - timedelta(seconds=60) + timedelta(milliseconds=offset_ms)
     return ReplayTick(
         ts=ts,
@@ -76,43 +61,23 @@ def _round(outcome: Outcome = Outcome.UP) -> Round:
     )
 
 
-def _config(
-    *,
-    mode: str | None = "time",
-    latency_ms: int = 100,
-    latency_ticks: int = 1,
-) -> ReplayConfig:
+def _config(*, mode: str | None = "time", latency_ms: int = 100, latency_ticks: int = 1) -> ReplayConfig:
     kwargs: dict[str, object] = {}
     if mode is not None:
-        kwargs.update(
-            latency_mode=mode,
-            latency_ticks=latency_ticks,
-            latency_ms=latency_ms,
-        )
+        kwargs.update(latency_mode=mode, latency_ticks=latency_ticks, latency_ms=latency_ms)
     return ReplayConfig(
         limits=SizingLimits(
-            kelly_fraction=D("0.25"),
-            max_notional_round=D("100"),
-            max_bankroll_fraction=D("0.5"),
-            fill_safety=D("0.8"),
-            min_edge=D("0.001"),
-            max_price=D("0.99"),
-            min_order_size=D("1"),
-            tick_size=D("0.01"),
+            kelly_fraction=D("0.25"), max_notional_round=D("100"),
+            max_bankroll_fraction=D("0.5"), fill_safety=D("0.8"),
+            min_edge=D("0.001"), max_price=D("0.99"),
+            min_order_size=D("1"), tick_size=D("0.01"),
         ),
         params=StrategyParams(
-            t_entry_sec=120,
-            delta_threshold=D("1"),
-            min_price=D("0.10"),
-            max_price=D("0.99"),
-            min_edge=D("0.001"),
-            flip_ratio=D("0.90"),
-            hedge_fraction=D("0.5"),
-            p_exit=D("0.30"),
+            t_entry_sec=120, delta_threshold=D("1"), min_price=D("0.10"),
+            max_price=D("0.99"), min_edge=D("0.001"), flip_ratio=D("0.90"),
+            hedge_fraction=D("0.5"), p_exit=D("0.30"),
         ),
-        vol=D("5"),
-        starting_balance=D("1000"),
-        **kwargs,
+        vol=D("5"), starting_balance=D("1000"), **kwargs,
     )
 
 
@@ -121,12 +86,7 @@ def _entry(price: str = "0.60") -> EnterOrder:
 
 
 def _hedge(price: str = "0.20") -> Hedge:
-    return Hedge(
-        token_id=DOWN,
-        outcome="DOWN",
-        price=D(price),
-        hedge_fraction=D("0.5"),
-    )
+    return Hedge(token_id=DOWN, outcome="DOWN", price=D(price), hedge_fraction=D("0.5"))
 
 
 def _exit(price: str = "0.55") -> Exit:
@@ -134,19 +94,15 @@ def _exit(price: str = "0.55") -> Exit:
 
 
 def test_tick_mode_complete_regression_default_vs_explicit() -> None:
-    ticks = [_tick(0), _tick(1000, up_ask="0.61")]
+    # Execution ask must remain within the 0.60 decision limit so both runs fill.
+    ticks = [_tick(0), _tick(1000, up_ask="0.60")]
     default_engine = ReplayEngine(_config(mode=None))
     explicit_engine = ReplayEngine(_config(mode="ticks", latency_ticks=1))
-
     default_engine._strategy.on_tick = Mock(return_value=[_entry()])
     explicit_engine._strategy.on_tick = Mock(return_value=[_entry()])
 
-    old_result, old_diag, old_obs = default_engine.observe(
-        _round(), ticks, bankroll=D("1000")
-    )
-    new_result, new_diag, new_obs = explicit_engine.observe(
-        _round(), ticks, bankroll=D("1000")
-    )
+    old_result, old_diag, old_obs = default_engine.observe(_round(), ticks, bankroll=D("1000"))
+    new_result, new_diag, new_obs = explicit_engine.observe(_round(), ticks, bankroll=D("1000"))
 
     assert old_result is not None
     assert new_result is not None
@@ -163,9 +119,7 @@ def test_time_mode_exact_50ms_entry() -> None:
     ticks = [_tick(0), _tick(50), _tick(100)]
     engine = ReplayEngine(_config(latency_ms=50))
     engine._strategy.on_tick = Mock(side_effect=[[_entry()], [NoOp()], [NoOp()]])
-
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert obs.entry_decision_tick_index == 0
@@ -181,12 +135,8 @@ def test_time_mode_exact_50ms_entry() -> None:
 def test_time_mode_100ms_request_executes_at_130ms() -> None:
     ticks = [_tick(0), _tick(50), _tick(130), _tick(200)]
     engine = ReplayEngine(_config(latency_ms=100))
-    engine._strategy.on_tick = Mock(
-        side_effect=[[_entry()], [NoOp()], [NoOp()], [NoOp()]]
-    )
-
+    engine._strategy.on_tick = Mock(side_effect=[[_entry()], [NoOp()], [NoOp()], [NoOp()]])
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert obs.entry_decision_tick_index == 0
@@ -201,9 +151,7 @@ def test_time_mode_no_future_entry_fails_closed() -> None:
     ticks = [_tick(0)]
     engine = ReplayEngine(_config(latency_ms=100))
     engine._strategy.on_tick = Mock(return_value=[_entry()])
-
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is None
     assert obs.classification == ROUND_SIGNAL_NO_FILL
     assert obs.no_future_tick_entry_attempts == 1
@@ -213,19 +161,10 @@ def test_time_mode_no_future_entry_fails_closed() -> None:
 
 
 def test_failed_fok_then_later_success_uses_successful_attempt_observability() -> None:
-    ticks = [
-        _tick(0),
-        _tick(100, up_ask="0.70"),
-        _tick(200, up_ask="0.60"),
-        _tick(300, up_ask="0.60"),
-    ]
+    ticks = [_tick(0), _tick(100, up_ask="0.70"), _tick(200), _tick(300)]
     engine = ReplayEngine(_config(latency_ms=100))
-    engine._strategy.on_tick = Mock(
-        side_effect=[[_entry("0.60")], [_entry("0.60")], [NoOp()], [NoOp()]]
-    )
-
+    engine._strategy.on_tick = Mock(side_effect=[[_entry()], [_entry()], [NoOp()], [NoOp()]])
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert obs.entry_decision_tick_index == 1
@@ -238,12 +177,8 @@ def test_failed_fok_then_later_success_uses_successful_attempt_observability() -
 def test_hedge_uses_time_selector_and_future_tick() -> None:
     ticks = [_tick(0), _tick(50), _tick(100), _tick(150)]
     engine = ReplayEngine(_config(latency_ms=50))
-    engine._strategy.on_tick = Mock(
-        side_effect=[[_entry()], [_hedge()], [NoOp()], [NoOp()]]
-    )
-
+    engine._strategy.on_tick = Mock(side_effect=[[_entry()], [_hedge()], [NoOp()], [NoOp()]])
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert result.hedge_cost > D("0")
@@ -254,9 +189,7 @@ def test_hedge_no_future_tick_increments_counter_without_hedge_fill() -> None:
     ticks = [_tick(0), _tick(50)]
     engine = ReplayEngine(_config(latency_ms=50))
     engine._strategy.on_tick = Mock(side_effect=[[_entry()], [_hedge()]])
-
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert obs.no_future_tick_hedge_attempts == 1
@@ -266,12 +199,8 @@ def test_hedge_no_future_tick_increments_counter_without_hedge_fill() -> None:
 def test_exit_uses_time_selector_and_closes_position() -> None:
     ticks = [_tick(0), _tick(50), _tick(100), _tick(150)]
     engine = ReplayEngine(_config(latency_ms=50))
-    engine._strategy.on_tick = Mock(
-        side_effect=[[_entry()], [_exit()], [NoOp()], [NoOp()]]
-    )
-
+    engine._strategy.on_tick = Mock(side_effect=[[_entry()], [_exit()], [NoOp()], [NoOp()]])
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert obs.no_future_tick_exit_attempts == 0
@@ -282,9 +211,7 @@ def test_exit_no_future_tick_increments_counter_and_position_settles() -> None:
     ticks = [_tick(0), _tick(50)]
     engine = ReplayEngine(_config(latency_ms=50))
     engine._strategy.on_tick = Mock(side_effect=[[_entry()], [_exit()]])
-
     result, _diag, obs = engine.observe(_round(), ticks, bankroll=D("1000"))
-
     assert result is not None
     assert obs.classification == ROUND_FILLED
     assert obs.no_future_tick_exit_attempts == 1
@@ -295,9 +222,7 @@ def test_replay_summary_aggregates_exact_no_future_entry_count() -> None:
     ticks = [_tick(0)]
     engine = ReplayEngine(_config(latency_ms=100))
     engine._strategy.on_tick = Mock(return_value=[_entry()])
-
     summary = engine.run([(_round(), ticks), (_round(Outcome.DOWN), ticks)])
-
     assert summary.rounds_entered == 0
     assert summary.no_future_tick_entry_attempts == 2
     assert summary.no_future_tick_hedge_attempts == 0
