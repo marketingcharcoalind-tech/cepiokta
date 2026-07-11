@@ -201,11 +201,13 @@ class _Accumulator:
 
     def row(self) -> SensitivityRow:
         stale_rate = (
-            self.stale_target_books / len(self.target_book_ages)
-            if self.target_book_ages
-            else 0.0
+            self.stale_target_books / len(self.target_book_ages) if self.target_book_ages else 0.0
         )
-        roi = self.net_pnl / self.starting_balance if self.starting_balance > _ZERO else _ZERO
+        roi = (
+            self.net_pnl / self.starting_balance
+            if self.starting_balance > _ZERO
+            else _ZERO
+        )
         return SensitivityRow(
             name=self.variant.name,
             rounds=self.rounds,
