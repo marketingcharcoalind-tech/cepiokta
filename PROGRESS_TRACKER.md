@@ -60,8 +60,8 @@
 - Reliability curve terkalibrasi? ⬜ Ya ⬜ Tidak
 - Edge bertahan setelah fee+slippage+latensi (ablation)? ⬜ Ya ⬜ Tidak
 
-> **Hasil G1:** ⬜ LANJUT (edge terbukti) · ⬜ REVISI strategi · ⬜ STOP (edge ≤ 0)
-> Net PnL backtest: ______ | ROI: ______ | Max DD: ______ | Tanggal: ______
+> **Hasil G1:** ⬜ LANJUT (edge terbukti) · ☑️ REVISI / CANDIDATE · ⬜ STOP (edge ≤ 0)
+> **G1 Candidate (analisis5):** min_price=0.96, ALL5 84 entries 83W/1L +$7.40 ROI +1.48%; status REVISI RINGAN / CANDIDATE, not LANJUT final. See `G1_CANDIDATE_REPORT_ANALISIS5.md`.
 > *(STOP adalah hasil yang valid & menyelamatkan modal — jangan paksakan.)*
 
 ---
