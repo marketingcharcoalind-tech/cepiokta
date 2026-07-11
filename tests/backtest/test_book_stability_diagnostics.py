@@ -323,3 +323,82 @@ class TestStoreLifecycle:
 
             # Verify successful return
             assert result == 0
+
+
+class TestReconstructTicksUsage:
+    """Regression tests for reconstruct_ticks usage (TypeError bug)."""
+
+    async def test_run_diagnostics_uses_load_round_replays_not_reconstruct_ticks(self) -> None:
+        """Regression: run_diagnostics must use load_round_replays(), not call reconstruct_ticks directly.
+        
+        Bug was: ticks = await reconstruct_ticks(store, rnd, config.vol, config.fee_model)
+        - reconstruct_ticks() is synchronous (not async)
+        - reconstruct_ticks() takes 3 args (rnd, snaps, sigs), not 4
+        
+        Fix: use load_round_replays() async generator which handles the loading internally.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from decimal import Decimal
+
+        from btcbot.backtest.book_stability_diagnostics import run_diagnostics, StabilityThresholds
+        from btcbot.backtest.replay import ReplayConfig
+        from btcbot.domain.fees import CryptoFeesV2
+        from btcbot.domain.strategy import StrategyParams
+        from btcbot.exec.sizing import SizingLimits
+
+        # Mock store
+        mock_store = MagicMock()
+
+        # Create a proper ReplayConfig (not a mock) to avoid seed TypeError
+        config = ReplayConfig(
+            params=StrategyParams(
+                t_entry_sec=60,
+                delta_threshold=Decimal("50"),
+                min_price=Decimal("0.96"),
+                max_price=Decimal("0.99"),
+                min_edge=Decimal("0"),
+                flip_ratio=Decimal("0.05"),
+                hedge_fraction=Decimal("1.0"),
+                p_exit=Decimal("0.40"),
+            ),
+            limits=SizingLimits(
+                kelly_fraction=Decimal("0.25"),
+                max_notional_round=Decimal("20"),
+                max_bankroll_fraction=Decimal("0.1"),
+                fill_safety=Decimal("0.9"),
+                min_edge=Decimal("0"),
+                max_price=Decimal("0.99"),
+                min_order_size=Decimal("0.01"),
+                tick_size=Decimal("0.01"),
+            ),
+            starting_balance=Decimal("500"),
+            vol=Decimal("5"),
+            fee_model=CryptoFeesV2(),
+            latency_ticks=2,
+            competition_fraction=Decimal("0.5"),
+            slippage_enabled=True,
+            seed=42,
+        )
+
+        # Mock thresholds
+        thresholds = StabilityThresholds()
+
+        # Mock load_round_replays to return empty (no rounds)
+        async def mock_load_empty():
+            return
+            yield  # Make it a generator
+        
+        # Patch in the replay module where it's imported from
+        with patch("btcbot.backtest.replay.load_round_replays", return_value=mock_load_empty()):
+            # This should NOT raise TypeError about reconstruct_ticks arguments
+            diagnostics = await run_diagnostics(
+                mock_store,
+                config,
+                since=None,
+                until=None,
+                max_rounds=None,
+                thresholds=thresholds,
+            )
+            
+            # Should return empty diagnostics (no rounds loaded)
+            assert diagnostics.metrics == []

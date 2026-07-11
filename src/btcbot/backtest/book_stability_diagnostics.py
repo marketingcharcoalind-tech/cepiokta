@@ -24,7 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from btcbot.backtest.replay import ReplayConfig, ReplayEngine, reconstruct_ticks
+from btcbot.backtest.replay import ReplayConfig, ReplayEngine
 from btcbot.data.store import Store
 from btcbot.domain.models import Outcome
 
@@ -352,8 +352,8 @@ async def run_diagnostics(
 ) -> BookStabilityDiagnostics:
     """Run book stability diagnostics on resolved rounds.
 
-    1. Load resolved rounds
-    2. Reproduce entered trades using ReplayEngine.run()
+    1. Stream resolved rounds + ticks using load_round_replays()
+    2. Reproduce entered trades using ReplayEngine (with bankroll compounding)
     3. For each entered trade, load post-entry book snapshots
     4. Compute stability metrics
     5. Aggregate into BookStabilityDiagnostics
@@ -369,37 +369,37 @@ async def run_diagnostics(
     Returns:
         BookStabilityDiagnostics with all metrics
     """
-    # Load resolved rounds
-    rounds = await store.get_resolved_rounds(since=since, until=until, limit=max_rounds)
-    if not rounds:
-        return BookStabilityDiagnostics()
+    from btcbot.backtest.replay import load_round_replays
 
-    # Run replay to get entered trades
+    # Run replay to get entered trades (using streaming loader)
     engine = ReplayEngine(config)
-    pairs = []
-    for rnd in rounds:
-        ticks = await reconstruct_ticks(store, rnd, config.vol, config.fee_model)
-        if not ticks:
-            continue
-        pairs.append((rnd, ticks))
-
-    summary = engine.run(pairs)
-    if summary.rounds_entered == 0:
-        return BookStabilityDiagnostics()
-
-    # Load signals for entry_ts approximation (same pattern as loss_diagnostics)
+    bankroll = config.starting_balance
+    results_list = []
+    rounds_list = []
     signals_map: dict[int, list[object]] = {}
-    for rnd in rounds:
-        sigs = await store.get_signals(rnd.round_no)
-        if sigs:
-            signals_map[rnd.round_no] = sigs
+
+    # Stream rounds and run replay with bankroll compounding
+    async for rnd, ticks in load_round_replays(store, since=since, until=until, limit=max_rounds):
+        # Run round
+        result, diag, obs = engine.observe(rnd, ticks, bankroll=bankroll)
+        if result is not None:
+            # Entry occurred, save for later analysis
+            results_list.append(result)
+            rounds_list.append(rnd)
+            bankroll = result.balance_after
+            
+            # Load signals for entry_ts approximation (same pattern as loss_diagnostics)
+            sigs = await store.get_signals(rnd.round_no)
+            if sigs:
+                signals_map[rnd.round_no] = sigs
+
+    if not results_list:
+        return BookStabilityDiagnostics()
 
     # For each entered trade, compute stability metrics
     diagnostics = BookStabilityDiagnostics()
-    for result in summary.results:
-        # Find corresponding round
-        rnd = next((r for r in rounds if r.round_no == result.round_no), None)
-        if rnd is None or rnd.window_end is None:
+    for result, rnd in zip(results_list, rounds_list):
+        if rnd.window_end is None:
             continue
 
         # Approximate entry_ts from signals (same as loss_diagnostics)
