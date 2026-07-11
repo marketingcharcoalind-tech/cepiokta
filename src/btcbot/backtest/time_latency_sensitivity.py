@@ -234,7 +234,7 @@ class _Accumulator:
         )
 
 
-async def run_sensitivity(
+async def run_sensitivity(  # noqa: PLR0913
     store: Store,
     base: ReplayConfig,
     *,
@@ -245,7 +245,12 @@ async def run_sensitivity(
 ) -> tuple[SensitivityRow, ...]:
     """Stream the dataset once and evaluate every latency config independently."""
     accumulators = [
-        _Accumulator(variant, ReplayEngine(config), base.starting_balance, base.starting_balance)
+        _Accumulator(
+            variant,
+            ReplayEngine(config),
+            base.starting_balance,
+            base.starting_balance,
+        )
         for variant, config in build_variant_configs(base, variants)
     ]
     async for rnd, ticks in load_round_replays(

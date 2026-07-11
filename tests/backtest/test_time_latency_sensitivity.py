@@ -69,9 +69,9 @@ def test_build_variant_configs_isolated_from_baseline():
 
 def test_build_variant_configs_rejects_invalid_values():
     base = _base_config()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid time latency"):
         build_variant_configs(base, (LatencyVariant("bad", "time", milliseconds=-1),))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Unknown latency mode"):
         build_variant_configs(base, (LatencyVariant("bad", "other"),))
 
 
