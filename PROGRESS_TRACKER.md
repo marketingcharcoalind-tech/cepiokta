@@ -1,232 +1,25 @@
 # PROGRESS TRACKER — 5min-btc-polymarket
 
-> Update file ini setiap menyelesaikan satu PROMPT (lihat PROMPT_GUIDE.md).
-> Status: ⬜ belum · 🟦 sedang dikerjakan · ✅ selesai · ⛔ blocked · ⏭️ di-skip
->
-> Mulai: `____-__-__`   |   Target G3 (live micro): `____-__-__`
+> Catatan status terbaru ada di `HANDOFF_2026-07-11.md`. File historis lengkap tetap tersedia di riwayat Git.
 
----
+## Status Aktif
 
-## 🔑 Prasyarat (sebelum Fase 0)
-| # | Item | Status | Catatan |
-|---|------|:------:|---------|
-| P1 | AI coding agent siap (Antigravity/Kiro/Codex/opencode/Cursor) | ⬜ | |
-| P2 | Repo Git dibuat + blueprint disalin ke root | ⬜ | |
-| P3 | Python 3.11+ + uv/poetry terpasang | ⬜ | |
-| P4 | PROMPT 0 (kickoff) sudah ditempel & agent meringkas blueprint | ⬜ | |
-| P5 | (untuk live nanti) wallet Polygon + USDC.e + RPC | ⬜ | jangan diisi sebelum Fase 3 |
+- Fase: Pre-G1 / Fase 1 backtest
+- G1: **BLOCKED / REVISI RINGAN**
+- Runtime: readonly soak, orders/fills harus 0/0
+- Kandidat: `t_entry=60`, `delta=50`, `min_price=0.96`, `max_price=0.99`
 
----
+## Time-Based Latency
 
-## ▶️ Cara baca tabel
-`Prompt` = nomor di PROMPT_GUIDE.md · `Modul` = file target · `DoD` = Definition of Done lulus? · isi `Tanggal` & `Catatan`.
+- [x] Core selector tick/time
+- [x] ReplayEngine entry/hedge/exit integration
+- [x] Non-vacuous engine tests tervalidasi VPS: 58/58 lulus pada 2026-07-11
+- [x] Time-latency sensitivity CLI ditambahkan: `backtest/time_latency_sensitivity.py`
+- [ ] Test CLI baru diverifikasi di VPS
+- [ ] Sensitivity 50/100/250/500/1000 ms dijalankan pada `analisis5.db`
+- [ ] ALL/OLD/NEW split dibandingkan
+- [ ] G1 final report dan keputusan LANJUT/REVISI/STOP
 
----
+## Safety
 
-## 🟢 FASE 0 — Scaffolding & Read-only Data  (Gate G0)
-| Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
-|:------:|-------|-------------|:------:|:-----:|---------|---------|
-| 0.1 | Setup repo & tooling | pyproject, CI, Makefile | ✅ | ✅ | 2026-06-25 | uv, ruff, black, mypy strict, GH Actions |
-| 0.2 | Settings, MODE gating, secrets | config/settings.py, .env.example | ✅ | ✅ | 2026-06-25 | pydantic-settings; assert_live_ok() |
-| 0.3 | Clock adapter | adapters/clock.py | ✅ | ✅ | 2026-06-25 | System+Sim, UTC aware, deterministik |
-| 0.4 | Gamma adapter (discovery) | adapters/gamma.py | ✅ | ✅ | 2026-06-25 | httpx; respx tests; endpoint TODO verify |
-| 0.5 | CLOB WebSocket (market data) | adapters/clob_ws.py | ✅ | ✅ | 2026-06-25 | reconnect/backoff/heartbeat/stale event |
-| 0.6 | Chainlink price feed | adapters/chainlink.py | ✅ | ✅ | 2026-06-25 | Protocol + Fake; on-chain placeholder TODO |
-| 0.7 | Store + Recorder | data/store.py, data/recorder.py | ✅ | ✅ | 2026-06-25 | aiosqlite; CRUD; gap marking |
-| 0.8 | CLI boot + runner readonly | app/cli.py, app/demo.py | ✅ | ✅ | 2026-06-25 | boot seq + readonly loop; `run-readonly` demo |
-| 0.7+ | Sizing + paper config (Phase 0.7) | exec/sizing.py, config | ✅ | ✅ | 2026-06-25 | KELLY_FRACTION + cap %bankroll + paper |
-
-**GATE G0** — ✅ NOL order (verified: orders=0, fills=0; tidak ada place_order/sign/oms di src) · ✅ data terekam (replay fixture 1000 ronde) · ✅ CI hijau (121 tests)
-> Status G0: ✅ LULUS (via replay fixture panjang) | Tanggal lulus: 2026-06-25
-> Bukti: 1000 rounds, 5000 book_snapshots (3000 real + 2000 gap), signals=0 (komputasi Fase 1), orders=0, fills=0, mode=readonly.
-> Catatan: Chainlink price_now sudah diimplementasikan (Data Feeds, eth_call read-only) → Δ kini terekam di signals. Soak-run nyata berjam-jam thd endpoint live (Gamma/CLOB) + verifikasi address feed (B1/B3) tetap disarankan; tidak memblok G0.
-
----
-
-## 🟡 FASE 1 — Backtest / Replay  (Gate G1)
-| Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
-|:------:|-------|-------------|:------:|:-----:|---------|---------|
-| 1.1 | Interval loader | domain/market.py | ✅ | ✅ | 2026-06-27 | pure; aligned_window/round_no_for + IntervalLoader (clock injectable); half-open [start,end); 31 test |
-| 1.2 | Signal engine (edge math) | domain/signal.py | ✅ | ✅ | 2026-06-27 | SignalEngine.compute (Δ,sigma_left,z,p_win=Φ(\|z\|),ask_win,net_edge); FeeModel pluggable (domain/fees.py, crypto_fees_v2 7% default) + FEE_RATE setting; net-of-fee; 28 test |
-| 1.3 | Strategy (entry/hedge/exit) | domain/strategy.py | ✅ | ✅ | 2026-06-27 | on_tick→Decision (EnterOrder/Hedge/Exit/NoOp); filter T_ENTRY/Δ/price-band/MIN_EDGE; hedge p_win<P_EXIT‖flip≥FLIP_RATIO; never-fade; +P_EXIT setting; 24 test |
-| 1.4 | Sizing (Kelly + caps) | exec/sizing.py | ✅ | ✅ | 2026-06-27 | `size(signal,…)→Decimal` pakai net_edge net-of-fee + round_to_tick + min_order; refactor `_capped_size` (compute_size tetap); 720+ invariant cases |
-| 1.5 | Replay engine + fill model | backtest/replay.py | ✅ | ✅ | 2026-06-27 | SimClock→SignalEngine→Strategy→Sizer→fill model; FOK/FAK level-walk slippage + fee7% + latency + kompetisi; settle label Gamma; reconstruct_ticks(LVCF)+run_and_persist(mode=backtest); deterministik; 19 test |
-| 1.6 | Laporan metrik & kalibrasi | backtest reporting | ✅ | ✅ | 2026-06-27 | report.py (Net PnL net-of-fee, ROI, win-rate, net_edge dist, reliability curve label Gamma, max DD, varians, sensitivity grid, ablation fee/slippage/latency) + scripts/backtest_report.py CLI; RoundDiagnostics + slippage_enabled di replay; 17 test |
-| 1.7 | Pure arb detector read-only | docs/15 + backtest/arb_detector.py (future) | ⬜ | ⬜ | | planned: detect UP+DOWN lock-pair opportunity (ask_up+ask_down+fee+slippage<1); read-only measurement; NO execution |
-
-**GATE G1 — KEPUTUSAN EDGE (paling kritikal):**
-- net_edge > 0 stabil lintas parameter? ⬜ Ya ⬜ Tidak
-- Stabil lintas beberapa hari data (bukan overfit)? ⬜ Ya ⬜ Tidak
-- Reliability curve terkalibrasi? ⬜ Ya ⬜ Tidak
-- Edge bertahan setelah fee+slippage+latensi (ablation)? ⬜ Ya ⬜ Tidak
-
-> **Hasil G1:** ⬜ LANJUT (edge terbukti) · ☑️ REVISI / CANDIDATE · ⬜ STOP (edge ≤ 0)
-> **G1 Candidate (analisis5):** min_price=0.96, ALL5 84 entries 83W/1L +$7.40 ROI +1.48%; status REVISI RINGAN / CANDIDATE, not LANJUT final. See `G1_CANDIDATE_REPORT_ANALISIS5.md`.
-> *(STOP adalah hasil yang valid & menyelamatkan modal — jangan paksakan.)*
-
----
-
-## 🟠 FASE 2 — Paper Trading  (Gate G2)
-| Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
-|:------:|-------|-------------|:------:|:-----:|---------|---------|
-| 2.1 | Risk manager | risk/manager.py | ⬜ | ⬜ | | |
-| 2.2 | OMS mode paper | exec/oms.py (paper) | ⬜ | ⬜ | | |
-| 2.3 | Paper runner + ledger | app/paper.py | ⬜ | ⬜ | | |
-| 2.4 | Reconciliation + alert | reconcile + alert | ⬜ | ⬜ | | |
-
-**GATE G2** — ⬜ ≥ ratusan ronde paper · ⬜ PnL konsisten dgn backtest · ⬜ nol mismatch
-> Status G2: ⬜ | Ronde paper: ______ | PnL paper: ______ | Tanggal lulus: ______
-
----
-
-## 🔴 FASE 3 — Live Micro-stakes  (Gate G3)  ⚠️ UANG NYATA
-**Checklist verifikasi API SEBELUM mulai (docs/04 §4.8):**
-- ⬜ Base URL & versi CLOB V2 terbaru terverifikasi
-- ⬜ Skema EIP-712 order V2 valid
-- ⬜ Nama channel WSS & format pesan
-- ⬜ Cara baca Chainlink BTC/USD di Polygon
-- ⬜ Fee, tick size, min order size market BTC 5m
-- ⬜ Restriksi geografis / kepatuhan akun dicek
-
-| Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
-|:------:|-------|-------------|:------:|:-----:|---------|---------|
-| 3.1 | Signer EIP-712 (CLOB V2) + auth | adapters/clob.py, Signer | ⬜ | ⬜ | | |
-| 3.2 | OMS mode live | exec/oms.py (live) | ⬜ | ⬜ | | |
-| 3.3 | Limit konservatif + gate live | risk/config | ⬜ | ⬜ | | |
-| 3.4 | Monitoring & alerting | metrics/alert | ⬜ | ⬜ | | |
-| 3.5 | Live runner | app/live.py | ⬜ | ⬜ | | |
-
-**GATE G3** — ⬜ kill-switch teruji · ⬜ circuit breaker teruji · ⬜ LIVE_CONFIRMED gate · ⬜ reconciliation bersih
-> Status G3: ⬜ | Notional/ronde: $____ | PnL LIVE: ______ | Insiden risk lolos: ____ | Tanggal: ______
-
----
-
-## 🟣 FASE 4 — Hardening & Scale  (Gate G4)
-| Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
-|:------:|-------|-------------|:------:|:-----:|---------|---------|
-| 4.1 | Ketahanan & deploy | Docker/systemd/failover | ⬜ | ⬜ | | |
-| 4.2 | Tuning berbasis data live + ADR | docs/adr/ | ⬜ | ⬜ | | |
-| 4.3 | Scale-up bersyarat | risk limits | ⬜ | ⬜ | | |
-
-**GATE G4** — ⬜ PnL live positif & stabil lintas hari sebelum tiap kenaikan ukuran
-> Status G4: ⬜ | Tanggal: ______
-
----
-
-## 📊 Status Ringkas (isi cepat)
-```
-Fase 0 [##########] 8/8     G0: ✅ LULUS (replay fixture)
-Fase 1 [##########] 6/6     G1: siap dijalankan (semua modul Fase 1 + laporan selesai) — tinggal keputusan G1 atas data nyata
-Fase 2 [          ] 0/4     G2: belum
-Fase 3 [          ] 0/5     G3: belum
-Fase 4 [          ] 0/3     G4: belum
-```
-
----
-
-## ⛔ Blockers / Risiko Aktif
-| # | Deskripsi | Sejak | Dampak | Rencana | Status |
-|---|-----------|-------|--------|---------|--------|
-| B1 | CLOB **REST** V2 (order/signing) belum diverifikasi | 2026-06-25 | blokir Fase 3 (live) | cek docs resmi Polymarket (docs/04 §4.8) | 🟦 |
-| B1-ws | CLOB **WS market** parser + keepalive — RESOLVED | 2026-06-26 | — | path `/ws/market`; parse LIST snapshot + `price_change`; keepalive: ping_interval=None + heartbeat "PING" 10s + stale 30s reconnect | ✅ |
-| B2b | Adapter Chainlink **Data Streams** BTC/USD (akurasi harga akhir-window) | 2026-06-25 | akurasi resolusi/edge; sumber resolusi asli market | bangun di Fase 1 (lihat task lanjutan) | 🟦 |
-| F1-fee | crypto_fees_v2 → net_edge — RESOLVED (formula terverifikasi) | 2026-06-25 | — | `fee=rate*min(p,1-p)^exponent` (feeSchedule live: rate 0.07, exponent 1, takerOnly); `domain/fees.estimate_fee`+`CryptoFeesV2`; fixture `gamma_fee_schedule.json`; dipakai signal/sizing/replay net-of-fee | ✅ |
-| B2 | Chainlink BTC/USD price_now — RESOLVED (Data Feeds reader + RPC failover) | 2026-06-25 | — | ChainlinkDataFeed (eth_call read-only) + retry/staleness/sanity; FailoverPriceSource primary+fallbacks, UA browser | ✅ |
-| B3 | Gamma discovery — RESOLVED (slug-based + window benar + fee parsed) | 2026-06-25 | — | regex slug `asset-updown-tf-epoch`; window dari eventStartTime/endDate (bukan startDate); query end_date window + UA browser | ✅ |
-| RES | Resolution recorder — RESOLVED (label outcome ronde) | 2026-06-26 | — | Gamma primer + Chainlink cross-check; settlement_price/resolution_source; resolve_due + `--resolve-backfill`; mismatch di-log | ✅ |
-| B-freeze | Recorder freeze — RESOLVED (consume_market gantung saat window tutup) | 2026-06-27 | soak mati 18 jam | deadline window_end+drain; iterasi manual + wait_for poll; aclose stream stop reconnect abadi; heartbeat | ✅ |
-| B4 | Discovery crash — RESOLVED (GammaError transient mematikan soak) | 2026-06-27 | soak mati saat gap window/hiccup Gamma | `app/discovery.discover_with_retry`: retry tak terbatas + backoff 1→2→5→cap (`GAMMA_DISCOVERY_MAX_BACKOFF_SECONDS`); transient(GammaError) retry vs fatal(auth/config) raise; log `discover_retry` | ✅ |
-| B5 | Resolver crash + jaring pengaman global — RESOLVED | 2026-06-27 | soak exit total saat httpx timeout di resolver | (1) `resolve_due` per-round try/except (skip transient granular, fatal raise); (2) cli bungkus `resolve_due` (log `resolve_retry`, lanjut); (3) `run_supervised` global: pulih dari exception tak terduga + backoff ter-cap (`loop_supervisor_restart`), hanya berhenti saat shutdown/fatal. `TRANSIENT_UPSTREAM_ERRORS` di gamma | ✅ |
-| B7 | Backtest report OOM (VPS 3.8GB) — RESOLVED | 2026-06-27 | report di-Killed (load semua ronde+book ke RAM) | filter pushdown ke SQL (`get_resolved_rounds` since/until/limit, N-terbaru); `load_round_replays` → async generator per-ronde (ticks di-GC); `RunAccumulator`+`stream_accumulators` (ablation/grid SATU pass streaming); `--max-rounds`; grid cap default 50+warn; progres ke stderr. Angka IDENTIK (regresi test). recorder/skema/math TIDAK disentuh | ✅ |
-| B9 | Harga spot BTC tak terekam selama ronde — RESOLVED | 2026-06-27 | backtest 0 entry (delta beku → p_win 0.5) | `app/price_sampler.PriceSampler`: rekam trajektori harga PARALEL dgn book (gather), cadence normal/ekor + dedup + freeze-safe + tahan PriceUnavailableError; wired di run_readonly/build_runtime + log `price_samples`. Backfill data lama: `ChainlinkHistory` (getRoundData walk) + `app/price_backfill` (idempoten, best-effort). reconstruct_ticks kini btc_price bergerak → entry>0 (regresi test) | ✅ |
-| TaskA | Instrumentasi gagal-fill (observability G1) — DONE | 2026-06-27 | vonis G1 butuh bedakan NO_SIGNAL vs SIGNAL_NO_FILL | `ReplayEngine.observe` + `RoundObservation` + `_ObsTally`: klasifikasi FILLED/SIGNAL_NO_FILL/NO_SIGNAL per ronde; ReplaySummary/BacktestReport ekspos 6 metrik + signal_no_fill_rate; report cetak section fill-failure. Observability MURNI (rounds_entered==rounds_filled, PnL identik); streaming B7 dipertahankan | ✅ |
-| TaskB | Kalibrasi volatilitas (reliability curve) — DONE | 2026-06-27 | vol=5 belum dikalibrasi → p_win overconfident → edge tak dipercaya | `backtest/calibrate.py` + `python -m btcbot.backtest.calibrate`: grid vol → reliability curve (Brier/logloss/ECE), rekomendasi Brier-min (tie ECE); kecualikan ronde stub pra-B9 (Δ konstan/<min_samples); streaming memory-safe; deterministik; --csv. TIDAK ubah signal.py & TIDAK tulis settings (rekomendasi manual). Prasyarat vonis G1 | ✅ |
-| TaskG2 | Entry diagnostics (alasan Strategy NoOp) — DONE | 2026-06-27 | backtest entered=0, perlu tahu gerbang mana yang menahan | `observe()` tally alasan NoOp jalur entry (time_left>t_entry / abs_delta<threshold / ask<min_price / ask>max_price / net_edge<min_edge) + ENTER; ReplaySummary/BacktestReport ekspos `entry_reason_counts`; report cetak `=== ENTRY DIAGNOSTICS ===`. Observability MURNI (tak ubah strategy/PnL/DB); streaming parity | ✅ |
-| TaskG3 | Fill-failure diagnostics (klasifikasi sebab NO_FILL) — DONE | 2026-06-30 | EnterOrder>0 tapi 0 fill, perlu tahu SEBAB tiap NO_FILL | `classify_no_fill()` read-only cermin `simulate_fill` → 1 dari {EMPTY_BOOK, BEST_PRICE_ABOVE_LIMIT, NO_LEVEL_WITHIN_LIMIT, INSUFFICIENT_DEPTH_FOK, REQUESTED_SIZE_ZERO, UNKNOWN}; `_exec_entry` rekam per EnterOrder; ReplaySummary/BacktestReport ekspos `fill_failure_counts`; report cetak `=== FILL FAILURE DIAGNOSTICS ===`. Observability MURNI (tak ubah simulate_fill/strategy/PnL/DB); streaming parity | ✅ |
-| TaskG4 | Sizing diagnostics (mengapa size()=0) — DONE | 2026-06-30 | G3 ungkap REQUESTED_SIZE_ZERO dominan → akar di `size()` sebelum fill | `diagnose_size()` read-only cermin `size()`: cap binding (KELLY/NOTIONAL/BANKROLL/DEPTH/NONE) + klasifikasi {RAW_BELOW_MIN, ROUNDED_BELOW_MIN, SUCCESS} + nilai tiap cap. Agregasi streaming memori-konstan (min/max/mean eksak + kuantil P-square, tanpa riwayat per-tick); ReplaySummary/BacktestReport ekspos `sizing_binding_counts`/`sizing_class_counts` + 6 distribusi; report cetak `=== SIZING DIAGNOSTICS ===`. Observability MURNI (tak ubah Kelly/sizing/strategy/PnL/DB); streaming parity. Temuan awal: DEPTH cap binding + raw<min_order → size=0 | ✅ |
-| TaskG5 | Depth diagnostics (mengapa DEPTH cap mengikat) — DONE | 2026-06-30 | G4 ungkap DEPTH cap binding → perlu tahu apakah depth market memang terlalu kecil | `SizingDiagnostic` ditambah `fill_safety`+`returned_size`; aggregator G4 diperluas: distribusi `depth_available` (P-square) + bucket rasio `depth_available/min_order_size` & `raw_size/min_order_size` (histogram memori-konstan, ambang 1.0=satu min-order). ReplaySummary/BacktestReport ekspos `depth_available_stats`/`depth_ratio_buckets`/`raw_ratio_buckets`; report cetak `=== DEPTH DIAGNOSTICS ===` (distribusi depth, depth_after_fill_safety, % DEPTH binding, bucket rasio). Observability MURNI (tak ubah sizing/PnL/DB); streaming parity | ✅ |
-| TaskRC | Root-cause duplicate book_snapshots — INSTRUMENTATION COMPLETE | 2026-07-01 | duplicate rows di book_snapshots (sama token_id/ts/best_bid/ask/depth, beda PK) → perlu runtime evidence sebelum fix | Instrumentasi PURE OBSERVABILITY: (1) clob_ws.py: ws_lifecycle (CONNECTED/RECONNECTED/DISCONNECTED/STALE + attempt + wall_time), ws_frame_received (event_type/is_snapshot/is_price_change/timestamp_raw/asset_ids), ws_stale_timeout, ws_parser_output (token_id/ts/best_bid/ask/depth); (2) recorder.py: recorder_book_received (sebelum _should_persist), persist_decision (decision+reason: first_snapshot/price_changed/finegrain_mode/throttle_expired/throttle_active), persist_book (nilai persisted). TIDAK ubah behavior/dedup/persistence. Hipotesis primer (85%): reconnect saat finegrain → BookState baru → first_snapshot lagi → duplikat. Lihat DUPLICATE_INVESTIGATION.md untuk prosedur koleksi evidence + analisis timeline | ✅ |
-| PreG1-Fixes | Pre-G1 blockers (3 fixes) — DONE | 2026-07-02 | 3 bug blocking vonis G1: (1) upsert_round menghapus resolusi (2) round_no inconsistent (3) delta_threshold='auto' diam-diam 0 | (1) Store.upsert_round: INSERT OR REPLACE → ON CONFLICT DO UPDATE (preserve resolution); (2) cli.py: round_no dari window_END bukan START (+300s/+900s → BREAKING DATA KEY); (3) report._resolve_delta: 'auto' → vol*sqrt(T_ENTRY) bukan 0. Test: upsert preserves resolution, _resolve_delta('auto')>0. CI green, backtest import works | ✅ |
-| PreG1-Discovery | Discovery blocker (0 markets) — FIXED | 2026-07-04 | bot dry-run gagal: discovery loop nol market btc-updown-5m | ROOT CAUSE: (1) slug epoch = window_START bukan END (verified 3+ samples); (2) 12h buffer end_date window berisiko 500-cap. FIX: by-slug discovery (6 windows 5m / 4 windows 15m), aligned epochs, no cap risk, 6-8 API calls (vs 144 dengan 12h). Fixes: _window_start/end() pakai epoch+tf correctly; gamma.py: DISCOVERY_NUM_WINDOWS. Tests: 1183 pass, updated for by-slug mocks. GATE: user MUST verify VPS dry-run (markets sparse ~8h gap normal). See DISCOVERY_FIX_V2.md, DISCOVERY_FINAL_REPORT.md | ✅ |
-| PreG1-Logging | Logging verbosity reduction (22GB→3GB) — DONE | 2026-07-04 | soak-run readonly 24h+ generated 22GB logs, disk full, bot restart ribuan kali | SOLUTION (Pure Logging, NO behavior change): (1) WS frame logs (ws_frame_received, ws_parser_output) → DEBUG level; (2) persist_decision logs → gated by INSTRUMENTATION_VERBOSE flag (default false); (3) New env flag INSTRUMENTATION_VERBOSE (Settings→Recorder). IMPACT: 4.3M→720K lines/24h, 22GB→3-4GB (83% reduction). VERIFICATION: 1183 tests pass, NO persistence/throttle/WS parsing changes. DEFAULT: only boot/round events/persist_book/resolution/errors/heartbeat. See LOGGING_REDUCTION_REPORT.md | ✅ |
-| CritBug-BookSnap | Book snapshots stopped recording (INVESTIGATED) | 2026-07-06 | Production DB: book_snapshots stopped Jul 4 23:32, signals continue normally (360 rounds resolved, 362 with signals, only 116 with book_snapshots) | INVESTIGATION: Code review shows NO BUG in recorder logic. All return statements correctly placed outside `if instrumentation_verbose:` blocks. The flag ONLY affects logging, NOT persistence. Root cause must be: (1) WebSocket stopped delivering books, (2) Market discovery issues, (3) External API changes, or (4) Process/config changes. Regression tests added (TestInstrumentationVerboseRegression). VPS diagnostics required. See BOOK_SNAPSHOTS_BUG_INVESTIGATION.md, VPS_DIAGNOSTICS.md | 🟦 |
-| ARB1 | Pure arb belum diukur | 2026-07-09 | perlu detector read-only untuk UP+DOWN lock-pair opportunity (ask_up+ask_down+fee+slippage<1); opportunity frequency/duration/depth/net_lock_edge belum terukur | planned: docs/15 + backtest/arb_detector.py (read-only measurement, NO execution); Phase 1: detector+analysis; Phase 2: paper simulation; Phase 3: live micro IF G1/G2 pass | ⬜ |
-
-## 🧠 Decision Log (ADR ringkas)
-| Tgl | Keputusan | Alasan | ADR file |
-|-----|-----------|--------|----------|
-| 2026-06-25 | Gamma discovery berbasis **slug** `asset-updown-tf-epoch`, bukan teks judul/durasi startDate | startDate = tanggal listing (~24j sebelum) → bug filter durasi lama menolak semua ronde; epoch slug = window_end andal | — |
-| 2026-06-25 | Market up/down 5m/15m **BERBIAYA**: `feesEnabled=true`, `feeType=crypto_fees_v2`, `feeSchedule{exponent,rate,takerOnly,rebateRate}` di-parse ke model | net_edge wajib memperhitungkan fee (Fase 1) | — |
-| 2026-06-25 | Resolusi market via **Chainlink Data Streams** (`resolutionSource`), bukan Data Feeds | basis-risk: sumber harga akhir-window harus = sumber resolusi (B2b) | — |
-| 2026-06-25 | `outcomePrices` Gamma **STALE** untuk market cepat → tidak dipakai sbg harga | harga live dari order book CLOB | — |
-| 2026-07-02 | **Pre-G1 fixes**: (1) upsert_round preserve resolution via ON CONFLICT (bukan INSERT OR REPLACE) (2) round_no dari window_END epoch (bukan START, +300s/900s) (3) delta_threshold='auto' vol-scaling (bukan 0) | (1) INSERT OR REPLACE menghapus settlement_price/resolution_source → ground truth hilang saat re-record; (2) round_no START tidak selaras market.round_no_for & slug epoch (window_END); (3) 'auto' fallback ke 0 mematikan filter Δ diam-diam → entry salah. Fix 2 = BREAKING DATA KEY (migrate atau start fresh DB) | — |
-| 2026-06-26 | WS market: book snapshot = JSON **array** (per token); `price_change` = dict (`price_changes[]`, BUY→bid/SELL→ask, size 0 hapus). Endpoint `/ws/market`. Maintain BookState per asset; best_bid=max(bids), best_ask=min(asks) | fix crash `.get()` pada list; harga live akurat dari order book | — |
-| 2026-06-26 | WS keepalive: server tak balas ping protokol → `ping_interval=None`/`ping_timeout=None` (matikan keepalive library) + heartbeat "PING" aplikasi tiap 10s (task terpisah) + stale 30s → reconnect | fix `1011 keepalive ping timeout` (mati ~45s meski data mengalir); konfig `WS_APP_PING_SECONDS`/`WS_STALE_SECONDS` | — |
-| 2026-06-26 | RPC failover: primary `POLYGON_RPC_URL` (chainstack) + fallbacks publik (publicnode/blastapi/blockpi). UA browser WAJIB (RPC publik 403 tanpa UA). Gagal = exception/HTTP/JSON-RPC/price<=0/stale>120s → endpoint berikutnya; semua gagal → AllRpcFailedError (Δ=None+gap) | RPC tunggal down → bot buta; failover otomatis | — |
-| 2026-06-26 | Retensi book: write-on-change + throttle 1s + fine-grain 45s akhir-window; default `BOOK_PERSIST_MODE=changes`. Order book in-mem tetap penuh; hanya persistensi di-throttle. Schema tetap (tanpa migrasi) | ~333 baris/dtk (~6 GB/hari) mayoritas duplikat depth-jitter → soak berhari/minggu | — |
-| 2026-06-26 | Resolution recorder: Gamma primer (outcomePrices/closed = ground truth) + Chainlink cross-check best-effort; kolom `settlement_price`/`resolution_source` (additive, migrasi idempoten). `resolution_mismatch` di-log (→ B2b). Backfill via `--resolve-backfill` | rounds.resolved_outcome selalu None → data soak tak bisa dikalibrasi | — |
-| 2026-06-26 | Fix resolver Gamma: query resolusi WAJIB `closed=true` (default /markets buang market closed → backfill resolved:0). `outcomes`/`outcomePrices` = JSON-encoded string → json.loads. Resolved hanya bila closed==true DAN outcomePrices definitif (tepat satu ≥0.99, sisanya ≤0.01); uma TIDAK jadi syarat. `fetch_resolved_market(slug|condition_id)` baru | --resolve-backfill selalu lapor resolved:0 | — |
-| 2026-06-26 | **PROMPT_GUIDE.md → v1.2**: injeksi TEMUAN NYATA dari VPS jaringan-bersih (blok ✅ VERIFIED REALITY + callout tiap prompt). Sinkron docs/04,05,06,07,09. Koreksi kritis fee **7% taker** (`crypto_fees_v2`, asumsi zero-fee SALAH) ke semua net_edge/PnL. Docs-only (tanpa ubah src/) | prompt lama belum memuat skema adapter & fee nyata → agent bisa salah asumsi | — |
-| 2026-06-27 | **Koreksi cross-check epoch**: `1782480000` = **13:20:00Z** (window_end), BUKAN 13:25:00Z (summary lama keliru 5 menit). Diverifikasi komputasi. PROMPT_GUIDE + market.py docstring diperbaiki | konvensi window/round_no harus akurat agar interval-loader & scanner benar | — |
-| | | | |
-
-## 🔬 Hasil Pengukuran Edge (diisi dari G1/G2/G3)
-| Sumber | Net PnL | ROI | Win-rate | Max DD | Catatan |
-|--------|---------|-----|----------|--------|---------|
-| Backtest (G1) | | | | | |
-| Paper (G2) | | | | | |
-| Live (G3) | | | | | |
-| Pure arb detector (G1) | | | | | opportunity count, duration_ms, depth, net_lock_edge, simulated two-leg fill success |
-
-
-
----
-
-## 📱 TELEGRAM CONTROL PLANE (cross-cutting — docs/12)
-| Prompt | Tugas | Modul utama | Status | DoD ✔ | Tanggal | Catatan |
-|:------:|-------|-------------|:------:|:-----:|---------|---------|
-| T.1 | Notifier Telegram (push) | adapters/telegram.py | ⬜ | ⬜ | | bangun di Fase 0/2 |
-| T.2 | Perintah & tombol read-only | app/control.py + handler | ⬜ | ⬜ | | Fase 2 |
-| T.3 | Aksi kontrol (pause/resume/kill) | control + risk | ⬜ | ⬜ | | Fase 2/3, sebelum live |
-
-**Setup Telegram (sebelum T.1):**
-- ⬜ Buat bot via @BotFather → dapat TELEGRAM_BOT_TOKEN
-- ⬜ Dapatkan chat_id (mis. @userinfobot) → isi ALLOWED_CHAT_IDS & NOTIFY_CHAT_ID
-- ⬜ Isi env Telegram di .env (jangan commit token)
-
-**Gate Telegram** — ⬜ whitelist berfungsi · ⬜ konfirmasi KILL 2-langkah · ⬜ Telegram down tidak hentikan trading · ⬜ token tidak ter-log
-
-
-
----
-
-## 📊 Notifikasi P&L & Error (bagian dari T.1 — docs/12 §12.12)
-- ⬜ Notif menang/kalah tiap trade (P&L) — `NOTIFY_PNL_WINS/LOSSES`
-- ⬜ Milestone profit + equity high baru
-- ⬜ Alert kalah beruntun (+auto-pause), drawdown, peringatan dini daily loss
-- ⬜ Ringkasan harian/sesi
-- ⬜ Notif error "ACTION REQUIRED" + saran perbaikan + tombol cepat
-- ⬜ Dedup error (anti-spam) & loss/error bypass /mute
-- ⬜ Test: pemicu event P&L + mapping error->remediation
-
-
-
----
-
-## 🧠 STRATEGI (docs/13)
-| Prompt | Tugas | Status | DoD ✔ | Catatan |
-|:------:|-------|:------:|:-----:|---------|
-| S.1 | Fair-value engine (#1 taker) + kalibrasi | ⬜ | ⬜ | inti, di Fase 1 |
-| S.2 | Delta-hedge arb (#2) | ⬜ | ⬜ | opsional, setelah #1 live |
-| S.3 | Market making (#3) | ⬜ | ⬜ | opsional, butuh latensi rendah |
-
-## 🌐 MULTI-MARKET (docs/14 — kerjakan di Fase 4, setelah BTC 5m live)
-| Prompt | Tugas | Status | DoD ✔ | Catatan |
-|:------:|-------|:------:|:-----:|---------|
-| M.1 | Market registry + MarketSpec config | ⬜ | ⬜ | |
-| M.2 | MarketScanner + per-market Worker | ⬜ | ⬜ | PriceFeed per aset |
-| M.3 | Risk multi-market & korelasi | ⬜ | ⬜ | cap korelasi BTC/ETH/SOL |
-| M.4 | Rollout bertahap (validasi per market) | ⬜ | ⬜ | enable satu per satu |
-
-**Status aktivasi market (centang saat lulus validasi edge+likuiditas):**
-- ⬜ BTC 5m (WAJIB pertama) · ⬜ BTC 15m · ⬜ ETH 5m · ⬜ ETH 15m · ⬜ SOL 5m · ⬜ SOL 15m
+Tetap readonly. Jangan masuk Phase 2, OMS, signer, private key, API key, atau live sebelum G1 resmi LANJUT.
