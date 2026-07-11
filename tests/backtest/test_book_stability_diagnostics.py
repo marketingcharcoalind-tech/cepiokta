@@ -402,3 +402,100 @@ class TestReconstructTicksUsage:
             
             # Should return empty diagnostics (no rounds loaded)
             assert diagnostics.metrics == []
+
+
+class TestSlottedDataclass:
+    """Regression tests for slotted dataclass (AttributeError __dict__ bug)."""
+
+    def test_book_stability_metrics_is_slotted(self) -> None:
+        """Verify BookStabilityMetrics is a slotted dataclass (no __dict__)."""
+        from datetime import datetime, timezone
+        from decimal import Decimal
+
+        from btcbot.backtest.book_stability_diagnostics import BookStabilityMetrics
+
+        # Create a sample metrics object
+        metrics = BookStabilityMetrics(
+            round_no=123,
+            entry_ts=datetime(2026, 7, 8, 14, 14, 0, tzinfo=timezone.utc),
+            time_left_entry=60.0,
+            side_taken="UP",
+            resolved_outcome="",
+            result="WIN",
+            pnl=Decimal("4.5"),
+            entry_price=Decimal("0.96"),
+            min_leader_bid_after_entry=Decimal("0.94"),
+            max_opposite_bid_after_entry=Decimal("0.04"),
+            min_leader_ask_after_entry=Decimal("0.96"),
+            max_opposite_ask_after_entry=Decimal("0.06"),
+            leader_bid_drawdown=Decimal("0.02"),
+            opposite_bid_spike=Decimal("0.04"),
+            leader_ask_drawdown=Decimal("0.00"),
+            leader_bid_below_0_95=False,
+            leader_bid_below_0_90=False,
+            leader_ask_below_0_95=False,
+            leader_ask_below_0_90=False,
+            opposite_bid_above_0_05=False,
+            opposite_bid_above_0_10=False,
+            opposite_bid_above_0_15=False,
+            book_flip_warning=False,
+            first_instability_ts=None,
+            seconds_after_entry_to_instability=None,
+            time_left_at_instability=None,
+        )
+
+        # Verify it's slotted (no __dict__)
+        assert not hasattr(metrics, "__dict__")
+
+    def test_book_stability_metrics_can_use_replace_not_dict(self) -> None:
+        """Regression: BookStabilityMetrics must use replace(), not __dict__.
+        
+        Bug was: metrics = BookStabilityMetrics(**{**metrics.__dict__, "resolved_outcome": "UP"})
+        - BookStabilityMetrics is slotted, so __dict__ doesn't exist
+        
+        Fix: metrics = replace(metrics, resolved_outcome="UP")
+        """
+        from dataclasses import replace
+        from datetime import datetime, timezone
+        from decimal import Decimal
+
+        from btcbot.backtest.book_stability_diagnostics import BookStabilityMetrics
+
+        # Create a sample metrics object
+        original = BookStabilityMetrics(
+            round_no=123,
+            entry_ts=datetime(2026, 7, 8, 14, 14, 0, tzinfo=timezone.utc),
+            time_left_entry=60.0,
+            side_taken="UP",
+            resolved_outcome="",  # Initially empty
+            result="WIN",
+            pnl=Decimal("4.5"),
+            entry_price=Decimal("0.96"),
+            min_leader_bid_after_entry=Decimal("0.94"),
+            max_opposite_bid_after_entry=Decimal("0.04"),
+            min_leader_ask_after_entry=Decimal("0.96"),
+            max_opposite_ask_after_entry=Decimal("0.06"),
+            leader_bid_drawdown=Decimal("0.02"),
+            opposite_bid_spike=Decimal("0.04"),
+            leader_ask_drawdown=Decimal("0.00"),
+            leader_bid_below_0_95=False,
+            leader_bid_below_0_90=False,
+            leader_ask_below_0_95=False,
+            leader_ask_below_0_90=False,
+            opposite_bid_above_0_05=False,
+            opposite_bid_above_0_10=False,
+            opposite_bid_above_0_15=False,
+            book_flip_warning=False,
+            first_instability_ts=None,
+            seconds_after_entry_to_instability=None,
+            time_left_at_instability=None,
+        )
+
+        # Use replace() to update resolved_outcome (works with slotted dataclass)
+        updated = replace(original, resolved_outcome="UP")
+
+        # Verify update worked
+        assert original.resolved_outcome == ""
+        assert updated.resolved_outcome == "UP"
+        assert updated.round_no == 123
+        assert updated.side_taken == "UP"

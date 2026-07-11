@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -429,9 +429,10 @@ async def run_diagnostics(
             result, rnd.window_end, post_entry, thresholds,
             entry_ts, rnd.token_id_up, rnd.token_id_down
         )
-        # Fill resolved_outcome from round
-        metrics = BookStabilityMetrics(
-            **{**metrics.__dict__, "resolved_outcome": rnd.resolved_outcome.value if rnd.resolved_outcome else ""}
+        # Fill resolved_outcome from round (use replace() for slotted dataclass)
+        metrics = replace(
+            metrics,
+            resolved_outcome=rnd.resolved_outcome.value if rnd.resolved_outcome else ""
         )
         diagnostics.add(metrics)
 
@@ -646,8 +647,6 @@ async def main_async(argv: list[str] | None = None) -> int:
     until = _parse_iso(args.until) if args.until else None
 
     # Build replay config using proper pattern (from_settings + replace)
-    from dataclasses import replace
-
     from btcbot.backtest.replay import ReplayConfig
     from btcbot.config.settings import get_settings
 
