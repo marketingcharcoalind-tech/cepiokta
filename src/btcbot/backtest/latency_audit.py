@@ -68,7 +68,8 @@ class LatencyAuditEntry:
     decision_ts: datetime
     execution_ts: datetime
     realized_latency_ms: float
-    same_timestamp: bool
+    same_index: bool  # decision_tick_index == actual_execution_tick_index
+    same_timestamp: bool  # decision_ts == execution_ts
     decision_time_left: float  # seconds
     execution_time_left: float
 
@@ -237,8 +238,8 @@ def _audit_round_entry(
     """Audit latency behavior for one round's entry attempt.
     
     This function replays the round and captures detailed latency observability
-    WITHOUT changing replay behavior. It re-simulates decision-to-execution
-    to extract audit metrics.
+    WITHOUT changing replay behavior. Uses EXACT tick indices from replay observability
+    to avoid ambiguous timestamp-to-index reconstruction.
     """
     # Run the round to see if entry occurs
     result, _diag, obs = engine.observe(rnd, ticks, bankroll=bankroll)
@@ -247,32 +248,77 @@ def _audit_round_entry(
         # No entry occurred
         return None
     
-    # Entry occurred - now audit the latency behavior
-    # Find the decision tick index
-    decision_tick_index = None
-    for i, tick in enumerate(ticks):
-        if tick.ts == obs.entry_decision_ts:
-            decision_tick_index = i
-            break
+    # Entry occurred - use EXACT indices from replay observability
+    # CRITICAL: DO NOT reconstruct indices by searching timestamps.
+    # Multiple ticks can share the same timestamp. Timestamp equality
+    # does not uniquely identify the decision event.
+    decision_tick_index = obs.entry_decision_tick_index
+    requested_execution_tick_index = obs.requested_entry_execution_tick_index
+    actual_execution_tick_index = obs.actual_entry_execution_tick_index
+    clamped = obs.entry_execution_clamped
     
+    # Fail closed if any exact index is missing
     if decision_tick_index is None:
         raise RuntimeError(
-            f"Round {rnd.round_no}: could not find decision tick with ts={obs.entry_decision_ts}"
+            f"Round {rnd.round_no}: entry occurred but decision_tick_index is None"
+        )
+    if requested_execution_tick_index is None:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: entry occurred but requested_execution_tick_index is None"
+        )
+    if actual_execution_tick_index is None:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: entry occurred but actual_execution_tick_index is None"
+        )
+    if clamped is None:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: entry occurred but entry_execution_clamped is None"
         )
     
-    # Compute execution tick indices
+    # Validate indices
     n = len(ticks)
-    requested_execution_tick_index = decision_tick_index + latency_ticks_config
-    actual_execution_tick_index = min(requested_execution_tick_index, n - 1)
-    clamped = requested_execution_tick_index >= n
+    if decision_tick_index < 0 or decision_tick_index >= n:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: decision_tick_index {decision_tick_index} out of bounds [0, {n})"
+        )
+    if actual_execution_tick_index < 0 or actual_execution_tick_index >= n:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: actual_execution_tick_index {actual_execution_tick_index} out of bounds [0, {n})"
+        )
+    
+    # Validate clamping logic
+    expected_actual = min(requested_execution_tick_index, n - 1)
+    if actual_execution_tick_index != expected_actual:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: actual_execution_tick_index {actual_execution_tick_index} != "
+            f"min(requested {requested_execution_tick_index}, {n}-1) = {expected_actual}"
+        )
     
     decision_tick = ticks[decision_tick_index]
     execution_tick = ticks[actual_execution_tick_index]
+    
+    # Validate that timestamps at observed indices match observed timestamps
+    if decision_tick.ts != obs.entry_decision_ts:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: decision tick timestamp {decision_tick.ts} != "
+            f"observed decision timestamp {obs.entry_decision_ts}"
+        )
+    if execution_tick.ts != obs.entry_fill_ts:
+        raise RuntimeError(
+            f"Round {rnd.round_no}: execution tick timestamp {execution_tick.ts} != "
+            f"observed fill timestamp {obs.entry_fill_ts}"
+        )
     
     # Timestamps and realized latency
     decision_ts = decision_tick.ts
     execution_ts = execution_tick.ts
     realized_latency_ms = (execution_ts - decision_ts).total_seconds() * 1000
+    
+    # Distinguish three cases:
+    # 1. Same index (decision_tick_index == actual_execution_tick_index)
+    # 2. Different index with same timestamp (indices differ but ts equal)
+    # 3. Different index with different timestamp (indices differ and ts differ)
+    same_index = (decision_tick_index == actual_execution_tick_index)
     same_timestamp = (decision_ts == execution_ts)
     
     decision_time_left = (rnd.window_end - decision_ts).total_seconds()
@@ -306,7 +352,9 @@ def _audit_round_entry(
     # Entry details
     decision_ask = decision_target_book.asks[0].price if decision_target_book.asks else None
     execution_ask = execution_target_book.asks[0].price if execution_target_book.asks else None
-    execution_limit_price = result.entry_price  # Approximation (actual limit may differ slightly)
+    # Note: execution_limit_price is approximated from result.entry_price
+    # The actual EnterOrder limit price is not exposed through observability yet
+    execution_limit_price = result.entry_price  # Approximation
     filled = True  # Entry occurred means fill succeeded
     
     # Result classification
@@ -325,6 +373,7 @@ def _audit_round_entry(
         decision_ts=decision_ts,
         execution_ts=execution_ts,
         realized_latency_ms=realized_latency_ms,
+        same_index=same_index,
         same_timestamp=same_timestamp,
         decision_time_left=decision_time_left,
         execution_time_left=execution_time_left,
@@ -396,7 +445,7 @@ def write_csv(diagnostics: LatencyAuditDiagnostics, path: Path) -> None:
             "round_no", "result", "pnl",
             "decision_tick_index", "requested_execution_tick_index", "actual_execution_tick_index",
             "total_tick_count", "latency_ticks_config", "clamped_to_last_tick",
-            "decision_ts", "execution_ts", "realized_latency_ms", "same_timestamp",
+            "decision_ts", "execution_ts", "realized_latency_ms", "same_index", "same_timestamp",
             "decision_time_left", "execution_time_left",
             "target_side", "decision_ask", "execution_ask", "execution_limit_price",
             "filled", "entry_price", "entry_size",
@@ -424,6 +473,7 @@ def write_csv(diagnostics: LatencyAuditDiagnostics, path: Path) -> None:
                 "decision_ts": e.decision_ts.isoformat(),
                 "execution_ts": e.execution_ts.isoformat(),
                 "realized_latency_ms": f"{e.realized_latency_ms:.3f}",
+                "same_index": str(e.same_index),
                 "same_timestamp": str(e.same_timestamp),
                 "decision_time_left": f"{e.decision_time_left:.2f}",
                 "execution_time_left": f"{e.execution_time_left:.2f}",

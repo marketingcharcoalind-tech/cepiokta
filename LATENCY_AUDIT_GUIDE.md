@@ -10,6 +10,27 @@
 
 The latency audit is a **read-only diagnostic tool** designed to comprehensively measure the behavior of the current tick-based latency model before making the G1 LANJUT decision.
 
+**IMPORTANT**: This document describes the corrected latency audit implementation. The initial version (commit b5cb123) contained a correctness bug that produced invalid results.
+
+### Bug in b5cb123 (FIXED)
+
+**Problem**: The initial implementation reconstructed `decision_tick_index` by searching for the first tick whose timestamp matched `obs.entry_decision_ts`:
+
+```python
+for i, tick in enumerate(ticks):
+    if tick.ts == obs.entry_decision_ts:
+        decision_tick_index = i
+        break
+```
+
+**Why this was wrong**: Multiple reconstructed book events can share the same timestamp. Timestamp equality does not uniquely identify the decision event. The selected index could be earlier than the actual decision index, producing incorrect execution indices and latency measurements.
+
+**Evidence of bug**: b5cb123 incorrectly reported 83/84 entries at 0ms latency (median/p95 0ms, max 1ms), contradicting verified exact replay observability showing 41/84 at 0ms, median 1ms, p95 479ms, max 1021ms.
+
+**Fix**: The corrected implementation uses **exact tick indices** captured directly from ReplayEngine at the moment of successful entry. No timestamp-based reconstruction occurs. Indices are passed through observability: `entry_decision_tick_index`, `requested_entry_execution_tick_index`, `actual_entry_execution_tick_index`, `entry_execution_clamped`.
+
+**DO NOT TRUST** any VPS results from b5cb123. Only results from the corrected version are valid.
+
 ### G1 Context
 
 **Candidate**: `t_entry=60`, `delta=50`, `min_price=0.96`, `max_price=0.99`  

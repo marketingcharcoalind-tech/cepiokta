@@ -518,6 +518,11 @@ class RoundObservation:
     # Entry timing (exact timestamps for decision-to-fill latency diagnostics; None if no entry).
     entry_decision_ts: datetime | None = None  # tick when EnterOrder emitted
     entry_fill_ts: datetime | None = None  # tick when fill occurred
+    # Entry tick indices (exact indices for latency audit; None if no entry).
+    entry_decision_tick_index: int | None = None  # tick index when decision occurred
+    requested_entry_execution_tick_index: int | None = None  # decision_index + latency_ticks
+    actual_entry_execution_tick_index: int | None = None  # min(requested, n-1)
+    entry_execution_clamped: bool | None = None  # requested >= n
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,6 +691,11 @@ class _RoundLedger:
         self.sizing_samples: list[SizingDiagnostic] = []
         # --- exact entry timing (observability murni; decision + fill timestamps) ---
         self.entry_decision_ts: datetime | None = None  # tick when EnterOrder was emitted
+        # --- exact entry tick indices (observability murni; latency audit correctness) ---
+        self.entry_decision_tick_index: int | None = None
+        self.requested_entry_execution_tick_index: int | None = None
+        self.actual_entry_execution_tick_index: int | None = None
+        self.entry_execution_clamped: bool | None = None
 
     @property
     def entered(self) -> bool:
@@ -755,8 +765,15 @@ class ReplayEngine:
         angka PnL/keputusan).
         """
         if rnd.resolved_outcome is None or not ticks:
-            return None, None, RoundObservation(ROUND_NO_SIGNAL, 0, 0, 0, 
-                                                entry_decision_ts=None, entry_fill_ts=None)
+            return None, None, RoundObservation(
+                ROUND_NO_SIGNAL, 0, 0, 0,
+                entry_decision_ts=None,
+                entry_fill_ts=None,
+                entry_decision_tick_index=None,
+                requested_entry_execution_tick_index=None,
+                actual_entry_execution_tick_index=None,
+                entry_execution_clamped=None,
+            )
 
         clock = SimClock(ticks[0].ts)
         ledger = _RoundLedger()
@@ -783,9 +800,18 @@ class ReplayEngine:
                 if isinstance(decision, EnterOrder):
                     entry_reasons[ENTRY_REASON_ENTER] += 1  # G2: lolos semua gerbang
                     ledger.enter_orders_yielded += 1  # R-A1: sinyal terbentuk
+                    # Compute exact tick indices for latency audit correctness
+                    decision_tick_index = i
+                    requested_execution_tick_index = i + self._cfg.latency_ticks
+                    actual_execution_tick_index = min(requested_execution_tick_index, n - 1)
+                    execution_clamped = requested_execution_tick_index >= n
                     self._exec_entry(
                         decision, signal, rnd, mbook, exec_tick, ledger, limits, bankroll,
-                        decision_ts=tick.ts,  # Capture exact decision timestamp
+                        decision_ts=tick.ts,
+                        decision_tick_index=decision_tick_index,
+                        requested_execution_tick_index=requested_execution_tick_index,
+                        actual_execution_tick_index=actual_execution_tick_index,
+                        execution_clamped=execution_clamped,
                     )
                 elif isinstance(decision, NoOp) and decision.reason in _ENTRY_NOOP_REASONS:
                     entry_reasons[decision.reason] += 1  # G2: alasan gerbang entry
@@ -828,6 +854,11 @@ class ReplayEngine:
         # entry_fill_ts: tick when that order was actually filled (after latency).
         entry_decision_ts = ledger.entry_decision_ts if ledger.entered else None
         entry_fill_ts = ledger.fills[0].ts if ledger.fills else None
+        # Extract exact tick indices for latency audit correctness.
+        entry_decision_tick_index = ledger.entry_decision_tick_index if ledger.entered else None
+        requested_entry_execution_tick_index = ledger.requested_entry_execution_tick_index if ledger.entered else None
+        actual_entry_execution_tick_index = ledger.actual_entry_execution_tick_index if ledger.entered else None
+        entry_execution_clamped = ledger.entry_execution_clamped if ledger.entered else None
         return RoundObservation(
             classification=classification,
             enter_orders_yielded=ledger.enter_orders_yielded,
@@ -840,6 +871,10 @@ class ReplayEngine:
             sizing_samples=tuple(ledger.sizing_samples),
             entry_decision_ts=entry_decision_ts,
             entry_fill_ts=entry_fill_ts,
+            entry_decision_tick_index=entry_decision_tick_index,
+            requested_entry_execution_tick_index=requested_entry_execution_tick_index,
+            actual_entry_execution_tick_index=actual_entry_execution_tick_index,
+            entry_execution_clamped=entry_execution_clamped,
         )
 
     def run(
@@ -935,6 +970,10 @@ class ReplayEngine:
         bankroll: Decimal,
         *,
         decision_ts: datetime,
+        decision_tick_index: int,
+        requested_execution_tick_index: int,
+        actual_execution_tick_index: int,
+        execution_clamped: bool,
     ) -> None:
         leader = Outcome(decision.outcome)
         decision_book = mbook.for_outcome(leader)
@@ -979,6 +1018,11 @@ class ReplayEngine:
         ledger.entry_fills += 1  # R-A4: fills_total (entry sukses)
         # Record exact decision timestamp (observability only; tick when EnterOrder emitted).
         ledger.entry_decision_ts = decision_ts
+        # Record exact tick indices (observability only; latency audit correctness).
+        ledger.entry_decision_tick_index = decision_tick_index
+        ledger.requested_entry_execution_tick_index = requested_execution_tick_index
+        ledger.actual_entry_execution_tick_index = actual_execution_tick_index
+        ledger.entry_execution_clamped = execution_clamped
         fee = self._fee(fr.avg_price, fr.filled_size)
         ledger.cash -= fr.notional + fee
         ledger.holdings[decision.token_id] = (
