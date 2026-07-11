@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import sys
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -147,9 +148,9 @@ class _Accumulator:
         result, _diagnostic, obs = self.engine.observe(rnd, ticks, bankroll=self.bankroll)
         self.signal_attempts += obs.enter_orders_yielded
         self.fills += obs.fills
-        self.no_future_entry += int(getattr(obs, "no_future_tick_entry_attempts", 0))
-        self.no_future_hedge += int(getattr(obs, "no_future_tick_hedge_attempts", 0))
-        self.no_future_exit += int(getattr(obs, "no_future_tick_exit_attempts", 0))
+        self.no_future_entry += obs.no_future_tick_entry_attempts
+        self.no_future_hedge += obs.no_future_tick_hedge_attempts
+        self.no_future_exit += obs.no_future_tick_exit_attempts
         if result is None:
             return
         self._record_entry(rnd, ticks, result, obs)
@@ -164,7 +165,11 @@ class _Accumulator:
         self.entries += 1
         self.net_pnl += result.pnl
         self.bankroll = result.balance_after
-        won = result.side_taken == rnd.resolved_outcome.value if rnd.resolved_outcome else result.pnl > _ZERO
+        won = (
+            result.side_taken == rnd.resolved_outcome.value
+            if rnd.resolved_outcome
+            else result.pnl > _ZERO
+        )
         if won:
             self.wins += 1
         else:
@@ -175,14 +180,12 @@ class _Accumulator:
         else:
             self.down_entries += 1
 
-        latency = getattr(obs, "realized_entry_latency_ms", None)
-        if latency is not None:
-            self.latencies.append(float(latency))
-        overshoot = getattr(obs, "entry_execution_overshoot_ms", None)
-        if overshoot is not None:
-            self.overshoots.append(float(overshoot))
+        if obs.realized_entry_latency_ms is not None:
+            self.latencies.append(obs.realized_entry_latency_ms)
+        if obs.entry_execution_overshoot_ms is not None:
+            self.overshoots.append(obs.entry_execution_overshoot_ms)
 
-        execution_index = getattr(obs, "actual_entry_execution_tick_index", None)
+        execution_index = obs.actual_entry_execution_tick_index
         if execution_index is None or not 0 <= execution_index < len(ticks):
             return
         execution_tick = ticks[execution_index]
@@ -278,7 +281,8 @@ def format_report(rows: Sequence[SensitivityRow]) -> str:
         lines.extend(
             [
                 f"[{row.name}] latency ms median/p95/max: "
-                f"{row.latency_median_ms:.3f}/{row.latency_p95_ms:.3f}/{row.latency_max_ms:.3f}",
+                f"{row.latency_median_ms:.3f}/{row.latency_p95_ms:.3f}/"
+                f"{row.latency_max_ms:.3f}",
                 f"[{row.name}] overshoot ms median/p95: "
                 f"{row.overshoot_median_ms:.3f}/{row.overshoot_p95_ms:.3f}",
                 f"[{row.name}] stale target book: {row.stale_target_book_rate:.1%}; "
@@ -380,10 +384,10 @@ async def main_async(argv: list[str] | None = None) -> int:
         )
     finally:
         await store.close()
-    print(format_report(rows))
+    sys.stdout.write(format_report(rows) + "\n")
     if args.csv is not None:
         write_csv(rows, args.csv)
-        print(f"CSV: {args.csv}")
+        sys.stdout.write(f"CSV: {args.csv}\n")
     return 0
 
 

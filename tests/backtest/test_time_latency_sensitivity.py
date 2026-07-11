@@ -1,6 +1,5 @@
 """Focused tests for the read-only time-latency sensitivity CLI."""
 
-from dataclasses import replace
 from decimal import Decimal
 
 import pytest
