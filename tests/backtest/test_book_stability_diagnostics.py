@@ -276,3 +276,50 @@ class TestCLIParser:
         assert args.opposite_bid_warn == 0.12
         assert args.leader_ask_warn == 0.91
         assert args.drawdown_warn == 0.08
+
+
+class TestStoreLifecycle:
+    """Tests for Store lifecycle (regression for AttributeError bugs)."""
+
+    async def test_main_async_uses_store_open_not_connect(self) -> None:
+        """Regression: main_async must use Store.open(), not Store() + connect()."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from btcbot.backtest.book_stability_diagnostics import main_async
+
+        # Mock Store.open to return a mock store
+        mock_store = MagicMock()
+        mock_store.close = AsyncMock()
+
+        # Mock run_diagnostics to return empty diagnostics
+        mock_diagnostics = MagicMock()
+        mock_diagnostics.metrics = []
+
+        with patch("btcbot.backtest.book_stability_diagnostics.Store.open", new_callable=AsyncMock) as mock_open, \
+             patch("btcbot.backtest.book_stability_diagnostics.run_diagnostics", new_callable=AsyncMock) as mock_run, \
+             patch("btcbot.backtest.book_stability_diagnostics.format_report") as mock_format:
+            
+            mock_open.return_value = mock_store
+            mock_run.return_value = mock_diagnostics
+            mock_format.return_value = "Test report"
+
+            # Run main_async with minimal args
+            argv = [
+                "--db", "sqlite+aiosqlite:///./test.db",
+                "--since", "2026-07-01T00:00:00+00:00",
+            ]
+            result = await main_async(argv)
+
+            # Verify Store.open was called (not Store() constructor + connect())
+            mock_open.assert_awaited_once_with("sqlite+aiosqlite:///./test.db")
+
+            # Verify store.close was called
+            mock_store.close.assert_awaited_once()
+
+            # Verify run_diagnostics was called with the mock store
+            assert mock_run.await_count == 1
+            call_args = mock_run.call_args[0]
+            assert call_args[0] is mock_store  # First arg should be store
+
+            # Verify successful return
+            assert result == 0

@@ -676,27 +676,25 @@ async def main_async(argv: list[str] | None = None) -> int:
         drawdown_warn=Decimal(str(args.drawdown_warn)),
     )
 
-    # Connect to store
-    store = Store(args.db)
+    # Connect to store (use Store.open pattern, not Store() + connect())
+    store = await Store.open(args.db)
     try:
-        await store.connect()
-
         # Run diagnostics
         diagnostics = await run_diagnostics(store, config, since, until, args.max_rounds, thresholds)
-
-        # Print report
-        report = format_report(diagnostics, thresholds)
-        print(report)
-
-        # Write CSV if requested
-        if args.csv:
-            csv_path = Path(args.csv)
-            write_csv(diagnostics, csv_path)
-            print(f"\nCSV written to: {csv_path}")
-
-        return 0
     finally:
         await store.close()
+
+    # Print report
+    report = format_report(diagnostics, thresholds)
+    print(report)
+
+    # Write CSV if requested
+    if args.csv:
+        csv_path = Path(args.csv)
+        write_csv(diagnostics, csv_path)
+        print(f"\nCSV written to: {csv_path}")
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
