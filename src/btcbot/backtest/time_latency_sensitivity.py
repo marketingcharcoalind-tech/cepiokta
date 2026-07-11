@@ -205,11 +205,7 @@ class _Accumulator:
             if self.target_book_ages
             else 0.0
         )
-        roi = (
-            self.net_pnl / self.starting_balance
-            if self.starting_balance > _ZERO
-            else _ZERO
-        )
+        roi = self.net_pnl / self.starting_balance if self.starting_balance > _ZERO else _ZERO
         return SensitivityRow(
             name=self.variant.name,
             rounds=self.rounds,
