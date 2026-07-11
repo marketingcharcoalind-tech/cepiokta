@@ -216,6 +216,9 @@ def _compute_stability_metrics(
     round_window_end: datetime,
     post_entry_snapshots: Sequence[BookSnapshot],
     thresholds: StabilityThresholds,
+    entry_ts: datetime,
+    token_id_up: str,
+    token_id_down: str,
 ) -> BookStabilityMetrics:
     """Compute book stability metrics for one entered trade.
 
@@ -224,6 +227,9 @@ def _compute_stability_metrics(
         round_window_end: window_end datetime for time_left calculation
         post_entry_snapshots: book snapshots from entry_ts to window_end
         thresholds: stability warning thresholds
+        entry_ts: approximate entry timestamp
+        token_id_up: UP token ID from round
+        token_id_down: DOWN token ID from round
 
     Returns:
         BookStabilityMetrics with all flags and extremes computed.
@@ -232,9 +238,13 @@ def _compute_stability_metrics(
     leader = Outcome(result.side_taken)
     opposite = Outcome.DOWN if leader is Outcome.UP else Outcome.UP
 
-    # Separate snapshots by token (UP/DOWN)
-    leader_snaps = [s for s in post_entry_snapshots if s.token_id.endswith(leader.value)]
-    opposite_snaps = [s for s in post_entry_snapshots if s.token_id.endswith(opposite.value)]
+    # Map to exact token IDs (do NOT use endswith - token IDs are not suffixed with UP/DOWN)
+    leader_token = token_id_up if leader is Outcome.UP else token_id_down
+    opposite_token = token_id_down if leader is Outcome.UP else token_id_up
+
+    # Separate snapshots by exact token_id equality
+    leader_snaps = [s for s in post_entry_snapshots if s.token_id == leader_token]
+    opposite_snaps = [s for s in post_entry_snapshots if s.token_id == opposite_token]
 
     # Compute extremes
     min_leader_bid = min((s.best_bid for s in leader_snaps if s.best_bid is not None), default=None)
@@ -267,7 +277,7 @@ def _compute_stability_metrics(
     # Find first instability timestamp
     first_instability_ts: datetime | None = None
     for snap in sorted(post_entry_snapshots, key=lambda s: s.ts):
-        is_leader = snap.token_id.endswith(leader.value)
+        is_leader = snap.token_id == leader_token
         triggered = False
         if is_leader:
             if snap.best_bid is not None and snap.best_bid <= thresholds.leader_bid_warn:
@@ -285,14 +295,10 @@ def _compute_stability_metrics(
             first_instability_ts = snap.ts
             break
 
-    # Timing calculations (approximation: need entry_ts)
-    # We'll approximate entry_ts from the result if possible, or from snapshots
-    # For simplicity, assume entry_ts = first post_entry_snapshot timestamp - small offset
-    # Better: pass entry_ts from replay. For now, use heuristic.
-    entry_ts_approx = post_entry_snapshots[0].ts if post_entry_snapshots else round_window_end
-    time_left_entry_calc = (round_window_end - entry_ts_approx).total_seconds()
+    # Timing calculations with provided entry_ts
+    time_left_entry_calc = (round_window_end - entry_ts).total_seconds()
     seconds_after_entry = (
-        (first_instability_ts - entry_ts_approx).total_seconds()
+        (first_instability_ts - entry_ts).total_seconds()
         if first_instability_ts is not None
         else None
     )
@@ -307,7 +313,7 @@ def _compute_stability_metrics(
 
     return BookStabilityMetrics(
         round_no=result.round_no,
-        entry_ts=entry_ts_approx,
+        entry_ts=entry_ts,
         time_left_entry=time_left_entry_calc,
         side_taken=result.side_taken,
         resolved_outcome="",  # Fill from round if needed
@@ -381,6 +387,13 @@ async def run_diagnostics(
     if summary.rounds_entered == 0:
         return BookStabilityDiagnostics()
 
+    # Load signals for entry_ts approximation (same pattern as loss_diagnostics)
+    signals_map: dict[int, list[object]] = {}
+    for rnd in rounds:
+        sigs = await store.get_signals(rnd.round_no)
+        if sigs:
+            signals_map[rnd.round_no] = sigs
+
     # For each entered trade, compute stability metrics
     diagnostics = BookStabilityDiagnostics()
     for result in summary.results:
@@ -389,14 +402,33 @@ async def run_diagnostics(
         if rnd is None or rnd.window_end is None:
             continue
 
-        # Load post-entry book snapshots
+        # Approximate entry_ts from signals (same as loss_diagnostics)
+        signals = signals_map.get(result.round_no, [])
+        if not signals:
+            continue
+
+        # Find signal at or near entry (time_left <= t_entry)
+        entry_signals = [s for s in signals if s.time_left_sec <= config.params.t_entry_sec]
+        if not entry_signals:
+            continue
+
+        # Use the FIRST signal that passed t_entry filter (earliest entry opportunity)
+        entry_signal = entry_signals[0]
+        entry_ts = entry_signal.ts
+
+        # Load book snapshots
         all_snaps = await store.get_book_snapshots(result.round_no)
-        # Filter to post-entry only (approximation: all snapshots for now)
-        # Better: filter by entry_ts if available
-        post_entry = [s for s in all_snaps if not s.gap]
+        # Filter to post-entry only (non-gap, ts >= entry_ts, ts <= window_end)
+        post_entry = [
+            s for s in all_snaps
+            if not s.gap and s.ts >= entry_ts and s.ts <= rnd.window_end
+        ]
 
         # Compute metrics
-        metrics = _compute_stability_metrics(result, rnd.window_end, post_entry, thresholds)
+        metrics = _compute_stability_metrics(
+            result, rnd.window_end, post_entry, thresholds,
+            entry_ts, rnd.token_id_up, rnd.token_id_down
+        )
         # Fill resolved_outcome from round
         metrics = BookStabilityMetrics(
             **{**metrics.__dict__, "resolved_outcome": rnd.resolved_outcome.value if rnd.resolved_outcome else ""}
@@ -613,39 +645,27 @@ async def main_async(argv: list[str] | None = None) -> int:
     since = _parse_iso(args.since) if args.since else None
     until = _parse_iso(args.until) if args.until else None
 
-    # Build replay config
-    from btcbot.domain.fees import CryptoFeesV2
-    from btcbot.domain.strategy import StrategyParams
+    # Build replay config using proper pattern (from_settings + replace)
+    from dataclasses import replace
 
-    fee_model = CryptoFeesV2()
-    params = StrategyParams(
-        t_entry=args.t_entry,
-        delta_threshold=Decimal(str(args.delta_threshold)),
-        min_price=Decimal(str(args.min_price)),
-        max_price=Decimal(str(args.max_price)),
-    )
-    from btcbot.backtest.replay import ReplayConfig, SizingLimits
+    from btcbot.backtest.replay import ReplayConfig
+    from btcbot.config.settings import get_settings
 
-    limits = SizingLimits(
-        kelly_fraction=Decimal("0.25"),
-        max_notional_round=Decimal("20"),
-        max_bankroll_fraction=Decimal("0.1"),
-        fill_safety=Decimal("0.9"),
-        min_edge=Decimal("0"),
-        max_price=Decimal(str(args.max_price)),
-        min_order_size=Decimal("0.01"),
-        tick_size=Decimal("0.01"),
-    )
-    config = ReplayConfig(
-        params=params,
-        limits=limits,
+    settings = get_settings()
+    base = ReplayConfig.from_settings(settings, delta_threshold=Decimal(str(args.delta_threshold)))
+
+    # Override with CLI parameters
+    config = replace(
+        base,
+        params=replace(
+            base.params,
+            t_entry_sec=args.t_entry,
+            delta_threshold=Decimal(str(args.delta_threshold)),
+            min_price=Decimal(str(args.min_price)),
+            max_price=Decimal(str(args.max_price)),
+        ),
+        limits=replace(base.limits, max_price=Decimal(str(args.max_price))),
         starting_balance=Decimal(str(args.starting_balance)),
-        vol=Decimal("5"),  # Default vol
-        fee_model=fee_model,
-        latency_ticks=2,
-        competition_fraction=Decimal("0.5"),
-        slippage_enabled=True,
-        seed=42,
     )
 
     # Thresholds

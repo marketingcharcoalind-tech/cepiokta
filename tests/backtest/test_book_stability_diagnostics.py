@@ -87,14 +87,17 @@ class TestComputeStabilityMetrics:
 
         # Stable book: leader stays high, opposite stays low
         snapshots = [
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=10), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=10), Decimal("0.04"), Decimal("0.06")),
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=30), Decimal("0.95"), Decimal("0.97")),
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=30), Decimal("0.03"), Decimal("0.05")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.04"), Decimal("0.06")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=30), Decimal("0.95"), Decimal("0.97")),
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=30), Decimal("0.03"), Decimal("0.05")),
         ]
 
         thresholds = StabilityThresholds()
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.round_no == 1234567890
         assert metrics.side_taken == "UP"
@@ -113,13 +116,16 @@ class TestComputeStabilityMetrics:
 
         # Leader bid crashes
         snapshots = [
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=10), Decimal("0.88"), Decimal("0.90")),  # Crash!
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.88"), Decimal("0.90")),  # Crash!
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
         ]
 
         thresholds = StabilityThresholds(leader_bid_warn=Decimal("0.90"))
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.result == "LOSS"
         assert metrics.leader_bid_below_0_90 is True
@@ -135,13 +141,16 @@ class TestComputeStabilityMetrics:
 
         # Opposite (UP) bid spikes
         snapshots = [
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=10), Decimal("0.12"), Decimal("0.14")),  # Spike!
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=10), Decimal("0.85"), Decimal("0.88")),
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.12"), Decimal("0.14")),  # Spike!
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.85"), Decimal("0.88")),
         ]
 
         thresholds = StabilityThresholds(opposite_bid_warn=Decimal("0.10"))
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.result == "LOSS"
         assert metrics.opposite_bid_above_0_10 is True
@@ -156,13 +165,16 @@ class TestComputeStabilityMetrics:
 
         # Leader ask crashes
         snapshots = [
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=10), Decimal("0.90"), Decimal("0.92")),  # Crash!
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=10), Decimal("0.06"), Decimal("0.08")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.90"), Decimal("0.92")),  # Crash!
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.06"), Decimal("0.08")),
         ]
 
         thresholds = StabilityThresholds(leader_ask_warn=Decimal("0.93"))
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.result == "LOSS"
         assert metrics.leader_ask_below_0_90 is True
@@ -177,13 +189,16 @@ class TestComputeStabilityMetrics:
 
         # Leader bid drops significantly (drawdown >= 0.06)
         snapshots = [
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=10), Decimal("0.89"), Decimal("0.91")),  # 0.96 - 0.89 = 0.07
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.95"), Decimal("0.96")),
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=10), Decimal("0.89"), Decimal("0.91")),  # 0.96 - 0.89 = 0.07
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.08"), Decimal("0.10")),
         ]
 
         thresholds = StabilityThresholds(drawdown_warn=Decimal("0.06"))
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.result == "LOSS"
         assert metrics.leader_bid_drawdown == Decimal("0.07")
@@ -197,27 +212,34 @@ class TestComputeStabilityMetrics:
 
         # Multiple instabilities at different times
         snapshots = [
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
-            _make_snapshot("token_DOWN", entry_ts + timedelta(seconds=10), Decimal("0.11"), Decimal("0.13")),  # First!
-            _make_snapshot("token_UP", entry_ts + timedelta(seconds=20), Decimal("0.88"), Decimal("0.90")),  # Later
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=5), Decimal("0.94"), Decimal("0.96")),
+            _make_snapshot("token-down-456", entry_ts + timedelta(seconds=10), Decimal("0.11"), Decimal("0.13")),  # First!
+            _make_snapshot("token-up-123", entry_ts + timedelta(seconds=20), Decimal("0.88"), Decimal("0.90")),  # Later
         ]
 
         thresholds = StabilityThresholds(opposite_bid_warn=Decimal("0.10"), leader_bid_warn=Decimal("0.90"))
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.book_flip_warning is True
         assert metrics.first_instability_ts == entry_ts + timedelta(seconds=10)
         assert metrics.seconds_after_entry_to_instability is not None
-        assert abs(metrics.seconds_after_entry_to_instability - 5.0) < 1.0  # Approx 5s after entry
+        assert abs(metrics.seconds_after_entry_to_instability - 10.0) < 0.1  # Exactly 10s after entry
 
     def test_no_post_entry_snapshots_handled_safely(self) -> None:
         """Empty post_entry_snapshots should be handled without crashing."""
         window_end = datetime(2026, 7, 8, 14, 15, 0, tzinfo=timezone.utc)
+        entry_ts = window_end - timedelta(seconds=60)
         result = _make_result(1234567890, "UP", Decimal("0.96"), Decimal("4.5"))
 
         snapshots: list[BookSnapshot] = []
         thresholds = StabilityThresholds()
-        metrics = _compute_stability_metrics(result, window_end, snapshots, thresholds)
+        metrics = _compute_stability_metrics(
+            result, window_end, snapshots, thresholds,
+            entry_ts, "token-up-123", "token-down-456"
+        )
 
         assert metrics.round_no == 1234567890
         assert metrics.min_leader_bid_after_entry is None
