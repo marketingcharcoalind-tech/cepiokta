@@ -45,6 +45,18 @@ async def _request(controller: TelegramActionController, command: str) -> Action
     return reply
 
 
+def _confirm(reply: ActionReply) -> str:
+    callback = reply.confirm_callback
+    assert callback is not None
+    return callback
+
+
+def _cancel(reply: ActionReply) -> str:
+    callback = reply.cancel_callback
+    assert callback is not None
+    return callback
+
+
 async def test_unauthorized_chat_cannot_request_or_confirm() -> None:
     controller, risk, _clock, _audit = _controller()
     assert await controller.command(999, "/kill") is None
@@ -56,7 +68,7 @@ async def test_pause_requires_second_step_and_is_audited() -> None:
     controller, risk, _clock, audit = _controller()
     reply = await _request(controller, "/pause")
     assert not risk.paused
-    result = await controller.handle_callback(123, reply.confirm_callback or "")
+    result = await controller.handle_callback(123, _confirm(reply))
     assert result is not None
     assert risk.paused
     assert [event.phase for event in audit.events] == ["requested", "executed"]
@@ -67,7 +79,7 @@ async def test_resume_does_not_clear_active_breaker() -> None:
     risk.pause()
     risk.on_event(CircuitReason.PRICE_STALE)
     reply = await _request(controller, "/resume")
-    await controller.handle_callback(123, reply.confirm_callback or "")
+    await controller.handle_callback(123, _confirm(reply))
     assert not risk.paused
     assert risk.should_halt()
 
@@ -76,7 +88,7 @@ async def test_kill_is_latched_after_confirmation() -> None:
     controller, risk, _clock, audit = _controller()
     reply = await _request(controller, "/kill")
     assert not risk.killed
-    await controller.handle_callback(123, reply.confirm_callback or "")
+    await controller.handle_callback(123, _confirm(reply))
     assert risk.killed
     assert risk.kill_reason == "telegram:123"
     assert audit.events[-1].action is ControlAction.KILL
@@ -85,7 +97,7 @@ async def test_kill_is_latched_after_confirmation() -> None:
 async def test_callback_is_single_use_anti_replay() -> None:
     controller, risk, _clock, _audit = _controller()
     reply = await _request(controller, "/pause")
-    callback = reply.confirm_callback or ""
+    callback = _confirm(reply)
     await controller.handle_callback(123, callback)
     second = await controller.handle_callback(123, callback)
     assert risk.paused
@@ -97,7 +109,7 @@ async def test_expired_confirmation_does_not_execute() -> None:
     controller, risk, clock, audit = _controller()
     reply = await _request(controller, "/kill")
     clock.advance(timedelta(seconds=61))
-    result = await controller.handle_callback(123, reply.confirm_callback or "")
+    result = await controller.handle_callback(123, _confirm(reply))
     assert result is not None
     assert "expired" in result.text.lower()
     assert not risk.killed
@@ -107,7 +119,7 @@ async def test_expired_confirmation_does_not_execute() -> None:
 async def test_cancel_does_not_execute() -> None:
     controller, risk, _clock, audit = _controller()
     reply = await _request(controller, "/pause")
-    result = await controller.handle_callback(123, reply.cancel_callback or "")
+    result = await controller.handle_callback(123, _cancel(reply))
     assert result is not None
     assert not risk.paused
     assert audit.events[-1].phase == "cancelled"
