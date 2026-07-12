@@ -105,9 +105,7 @@ class TelegramReadOnlyRouter:
         self._facade = facade
         self._allowed = frozenset(allowed_chat_ids)
 
-    async def handle(  # noqa: PLR0911
-        self, chat_id: int, text: str
-    ) -> CommandReply | None:
+    async def handle(self, chat_id: int, text: str) -> CommandReply | None:  # noqa: PLR0911
         """Return None for unauthorized chats; never reveal workspace state."""
         if chat_id not in self._allowed:
             return None

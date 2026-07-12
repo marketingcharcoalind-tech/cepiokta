@@ -12,9 +12,7 @@ class Source:
         self.recent_limit: int | None = None
 
     async def status(self) -> ControlStatus:
-        return ControlStatus(
-            "paper", 123, Decimal("501.25"), Decimal("1.25"), 1, "ok", False
-        )
+        return ControlStatus("paper", 123, Decimal("501.25"), Decimal("1.25"), 1, "ok", False)
 
     async def positions(self) -> tuple[Position, ...]:
         return (Position(7, "up", Decimal("2"), Decimal("0.96")),)
