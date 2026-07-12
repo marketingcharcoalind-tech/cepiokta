@@ -1,7 +1,7 @@
 """Fail-closed risk gate for paper trading (docs/06, Prompt 2.1).
 
-Every future paper order must pass :meth:`RiskManager.check`.  This module has no
-OMS, network, signing, secret, or live-order dependency.  Money values use
+Every future paper order must pass :meth:`RiskManager.check`. This module has no
+OMS, network, signing, secret, or live-order dependency. Money values use
 ``Decimal`` and the rolling rate-limit clock is injectable and UTC-aware.
 """
 
@@ -135,7 +135,7 @@ class RiskManager:
     """Stateful final gate for paper orders, kill-switches, and breakers.
 
     Pause and ordinary circuit breakers block only new risk, so an EXIT can still
-    reduce exposure.  A manual/automatic kill or reconciliation mismatch blocks
+    reduce exposure. A manual/automatic kill or reconciliation mismatch blocks
     every action and cannot be silently cleared by ``resume``.
     """
 
@@ -172,7 +172,7 @@ class RiskManager:
         self._paused = False
 
     def kill(self, reason: str) -> None:
-        """Latch the kill-switch.  There is intentionally no implicit reset."""
+        """Latch the kill-switch. There is intentionally no implicit reset."""
         normalized = reason.strip()
         self._killed = True
         self._kill_reason = normalized or "manual_kill"
@@ -194,40 +194,34 @@ class RiskManager:
         """Return whether new entries must halt."""
         return self._killed or self._paused or bool(self._breakers)
 
-    def check(self, order: RiskOrder, state: RiskState) -> RiskDecision:
+    def check(self, order: RiskOrder, state: RiskState) -> RiskDecision:  # noqa: PLR0911
         """Return ``Allow`` or ``Veto`` and fail closed on invalid state."""
         now = self._utc_now()
         invalid_reason = self._validate(order, state, now)
         if invalid_reason is not None:
             return Veto(invalid_reason)
-
         if self._killed:
             return Veto(f"kill_switch:{self._kill_reason or 'active'}")
-
         automatic = self._automatic_kill_reason(state)
         if automatic is not None:
             self.kill(automatic)
             return Veto(f"kill_switch:{automatic}")
-
         if order.increases_risk:
             if self._paused:
                 return Veto("paused")
             if self._breakers:
                 reasons = ",".join(sorted(reason.value for reason in self._breakers))
                 return Veto(f"circuit_breaker:{reasons}")
-
         recent_count = sum(
             now - _RATE_WINDOW < timestamp <= now for timestamp in state.recent_order_timestamps
         )
         if recent_count >= self._limits.max_orders_per_min:
             return Veto("max_orders_per_min")
-
         if order.increases_risk:
             if state.round_notional + order.notional > self._limits.max_notional_round:
                 return Veto("max_notional_round")
             if state.open_exposure + order.notional > self._limits.max_open_exposure:
                 return Veto("max_open_exposure")
-
         return Allow()
 
     def _utc_now(self) -> datetime:
@@ -237,7 +231,9 @@ class RiskManager:
         return now.astimezone(UTC)
 
     @staticmethod
-    def _validate(order: RiskOrder, state: RiskState, now: datetime) -> str | None:
+    def _validate(  # noqa: PLR0911
+        order: RiskOrder, state: RiskState, now: datetime
+    ) -> str | None:
         request = order.request
         if order.round_no < 0:
             return "invalid_round"
