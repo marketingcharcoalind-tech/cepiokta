@@ -5,7 +5,9 @@ only optional CSV/text output. It never imports or calls OMS, signing, or order 
 
 Recorded snapshots contain best price plus aggregate side depth, not exact depth at
 the best level. Replay depth and theoretical PnL are therefore explicit upper-bound
-proxies, never executable-profit claims.
+proxies, never executable-profit claims. Duration follows the recorder's documented
+last-value-carried-forward (LVCF) semantics: a state remains effective until the
+next unique paired-book state.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ class ArbEpisode:
     round_no: int
     start_ts: datetime
     end_ts: datetime
-    duration_ms: int
+    implied_duration_ms: int
     observations: int
     best_net_edge: Decimal
     min_depth_upper_bound: Decimal
@@ -83,7 +85,7 @@ class ArbDetectionReport:
 class _EpisodeBuilder:
     round_no: int
     start_ts: datetime
-    end_ts: datetime
+    last_valid_ts: datetime
     observations: int
     best_edge: Decimal
     min_depth_upper_bound: Decimal
@@ -95,7 +97,7 @@ class _EpisodeBuilder:
         observation_ts: datetime,
         max_lock_size: Decimal,
     ) -> None:
-        self.end_ts = observation_ts
+        self.last_valid_ts = observation_ts
         self.observations += 1
         edge = opportunity.net_lock_edge or _ZERO
         self.best_edge = max(self.best_edge, edge)
@@ -103,12 +105,13 @@ class _EpisodeBuilder:
         size = min(opportunity.max_lock_size, max_lock_size)
         self.best_pnl_upper_bound = max(self.best_pnl_upper_bound, edge * size)
 
-    def finish(self) -> ArbEpisode:
-        duration = max(0, int((self.end_ts - self.start_ts).total_seconds() * 1000))
+    def finish(self, effective_until: datetime) -> ArbEpisode:
+        end_ts = max(self.last_valid_ts, effective_until)
+        duration = max(0, int((end_ts - self.start_ts).total_seconds() * 1000))
         return ArbEpisode(
             self.round_no,
             self.start_ts,
-            self.end_ts,
+            end_ts,
             duration,
             self.observations,
             self.best_edge,
@@ -136,15 +139,17 @@ def detect_round_episodes(
     ticks: Sequence[ReplayTick],
     config: ArbDetectorConfig,
 ) -> tuple[tuple[ArbEpisode, ...], dict[str, int], int, int, int]:
-    """Group consecutive unique valid paired-book states into episodes."""
+    """Group unique states and measure LVCF-implied opportunity lifetimes."""
     episodes: list[ArbEpisode] = []
     rejects = dict.fromkeys(REJECT_REASONS, 0)
     current: _EpisodeBuilder | None = None
     valid_states = 0
     unique_states = 0
     previous_key: tuple[object, ...] | None = None
+    last_tick_ts: datetime | None = None
 
     for tick in ticks:
+        last_tick_ts = tick.ts
         state_key = _book_state_key(tick)
         if state_key == previous_key:
             continue
@@ -180,11 +185,11 @@ def detect_round_episodes(
             if opportunity.reject_reason is not None:
                 rejects[opportunity.reject_reason] += 1
             if current is not None:
-                episodes.append(current.finish())
+                episodes.append(current.finish(tick.ts))
                 current = None
 
     if current is not None:
-        episodes.append(current.finish())
+        episodes.append(current.finish(last_tick_ts or current.last_valid_ts))
     return tuple(episodes), rejects, len(ticks), unique_states, valid_states
 
 
@@ -243,7 +248,7 @@ def _percentile(values: Sequence[int], q: float) -> float:
 
 
 def format_report(report: ArbDetectionReport) -> str:
-    durations = [episode.duration_ms for episode in report.episodes]
+    durations = [episode.implied_duration_ms for episode in report.episodes]
     edges = [episode.best_net_edge for episode in report.episodes]
     depths = [episode.min_depth_upper_bound for episode in report.episodes]
     median_edge = sorted(edges)[len(edges) // 2] if edges else _ZERO
@@ -255,9 +260,9 @@ def format_report(report: ArbDetectionReport) -> str:
         f"unique paired-book states: {report.unique_book_states}",
         f"valid states     : {report.valid_states}",
         f"opportunity episodes: {len(report.episodes)}",
-        f"duration ms p25/median/p75/max: {_percentile(durations, 0.25):.1f}/"
-        f"{_percentile(durations, 0.50):.1f}/{_percentile(durations, 0.75):.1f}/"
-        f"{max(durations, default=0)}",
+        f"LVCF-implied duration ms p25/median/p75/max: "
+        f"{_percentile(durations, 0.25):.1f}/{_percentile(durations, 0.50):.1f}/"
+        f"{_percentile(durations, 0.75):.1f}/{max(durations, default=0)}",
         f"median best edge : {median_edge}",
         f"median aggregate-depth upper bound: {median_depth}",
         f"theoretical PnL upper bound before two-leg execution risk: "
@@ -267,6 +272,7 @@ def format_report(report: ArbDetectionReport) -> str:
     lines.extend(f"  {reason}: {report.reject_counts.get(reason, 0)}" for reason in REJECT_REASONS)
     lines.extend(
         [
+            "WARNING: duration is LVCF-implied until the next recorded state.",
             "WARNING: recorder has aggregate side depth, not best-level depth.",
             "WARNING: depth and PnL are upper-bound proxies, not executable estimates.",
             "WARNING: Phase 1 does not simulate atomic two-leg fills.",
@@ -285,7 +291,7 @@ def write_csv(report: ArbDetectionReport, path: Path) -> None:
                     episode.round_no,
                     episode.start_ts.isoformat(),
                     episode.end_ts.isoformat(),
-                    episode.duration_ms,
+                    episode.implied_duration_ms,
                     episode.observations,
                     str(episode.best_net_edge),
                     str(episode.min_depth_upper_bound),

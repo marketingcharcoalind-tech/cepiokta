@@ -36,19 +36,31 @@ def _config() -> ArbDetectorConfig:
     )
 
 
-def test_contiguous_valid_states_form_one_episode_with_duration():
-    ticks = [_tick(0, "0.48", "0.49"), _tick(100, "0.47", "0.49")]
+def test_valid_state_lasts_until_next_invalid_state():
+    ticks = [_tick(0, "0.48", "0.49"), _tick(100, "0.50", "0.50")]
     episodes, rejects, tick_count, unique_states, valid_states = detect_round_episodes(
         7, ticks, _config()
     )
     assert tick_count == 2
     assert unique_states == 2
-    assert valid_states == 2
+    assert valid_states == 1
     assert len(episodes) == 1
-    assert episodes[0].duration_ms == 100
+    assert episodes[0].implied_duration_ms == 100
+    assert episodes[0].observations == 1
+    assert sum(rejects.values()) == 1
+
+
+def test_contiguous_valid_states_use_next_invalid_as_end():
+    ticks = [
+        _tick(0, "0.48", "0.49"),
+        _tick(100, "0.47", "0.49"),
+        _tick(250, "0.50", "0.50"),
+    ]
+    episodes, _, _, _, valid_states = detect_round_episodes(7, ticks, _config())
+    assert valid_states == 2
+    assert episodes[0].implied_duration_ms == 250
     assert episodes[0].observations == 2
     assert episodes[0].best_net_edge == Decimal("0.04")
-    assert sum(rejects.values()) == 0
 
 
 def test_lvcf_duplicate_state_is_not_counted_twice():
@@ -59,14 +71,15 @@ def test_lvcf_duplicate_state_is_not_counted_twice():
         first.book_up,
         first.book_down,
     )
+    invalid = _tick(200, "0.50", "0.50")
     episodes, _, tick_count, unique_states, valid_states = detect_round_episodes(
-        7, [first, duplicate], _config()
+        7, [first, duplicate, invalid], _config()
     )
-    assert tick_count == 2
-    assert unique_states == 1
+    assert tick_count == 3
+    assert unique_states == 2
     assert valid_states == 1
     assert episodes[0].observations == 1
-    assert episodes[0].duration_ms == 0
+    assert episodes[0].implied_duration_ms == 200
 
 
 def test_invalid_state_splits_episodes():
@@ -74,11 +87,12 @@ def test_invalid_state_splits_episodes():
         _tick(0, "0.48", "0.49"),
         _tick(100, "0.50", "0.50"),
         _tick(200, "0.47", "0.49"),
+        _tick(300, "0.50", "0.50"),
     ]
     episodes, rejects, _, _, valid_states = detect_round_episodes(7, ticks, _config())
     assert valid_states == 2
     assert len(episodes) == 2
-    assert sum(rejects.values()) == 1
+    assert sum(rejects.values()) == 2
 
 
 def test_theoretical_pnl_is_explicit_upper_bound():
