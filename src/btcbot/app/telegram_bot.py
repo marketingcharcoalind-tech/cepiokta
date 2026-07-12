@@ -1,18 +1,16 @@
-"""Telegram long-poll runtime for paper control-plane commands.
+"""Telegram long-poll runtime with a persistent bottom menu for paper control.
 
 Run with ``python -m btcbot.app.telegram_bot``. The process uses Telegram Bot API
-long polling, routes read-only commands/buttons, and supports confirmed risk
-actions. It never submits market orders and never logs the bot token.
+long polling, routes read-only menu buttons, and supports confirmed pause/resume/
+kill actions. It never submits market orders and never logs the bot token.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import signal
-import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC
 from decimal import Decimal
 from time import monotonic
 from typing import Any, Protocol
@@ -21,19 +19,24 @@ import httpx
 import structlog
 
 from btcbot.adapters.clock import SystemClock
-from btcbot.app.control import (
-    CommandReply,
-    ControlFacade,
-    ControlStatus,
-    MenuButton,
-    TelegramReadOnlyRouter,
-)
+from btcbot.app.control import ControlFacade, ControlStatus, MenuButton, TelegramReadOnlyRouter
 from btcbot.app.control_actions import ActionReply, AuditEvent, AuditSink, TelegramActionController
 from btcbot.config.settings import Mode, Settings, get_settings
 from btcbot.domain.models import Position, RoundResult
 from btcbot.risk.manager import RiskLimits, RiskManager
 
 _LOG = structlog.get_logger()
+
+_MENU_COMMANDS = {
+    "📊 Status": "/status",
+    "💰 P&L": "/pnl",
+    "📈 Positions": "/positions",
+    "🧾 Recent": "/recent 5",
+    "⏸ Pause": "/pause",
+    "▶️ Resume": "/resume",
+    "🛑 KILL": "/kill",
+    "⚙️ Config": "/config",
+}
 
 
 class TelegramAPI(Protocol):
@@ -44,6 +47,8 @@ class TelegramAPI(Protocol):
         chat_id: int,
         text: str,
         keyboard: tuple[tuple[MenuButton, ...], ...] = (),
+        *,
+        persistent: bool = False,
     ) -> None: ...
 
     async def answer_callback(self, callback_id: str, text: str) -> None: ...
@@ -81,9 +86,19 @@ class TelegramBotAPI:
         chat_id: int,
         text: str,
         keyboard: tuple[tuple[MenuButton, ...], ...] = (),
+        *,
+        persistent: bool = False,
     ) -> None:
         body: dict[str, Any] = {"chat_id": chat_id, "text": text}
-        if keyboard:
+        if keyboard and persistent:
+            body["reply_markup"] = {
+                "keyboard": [[{"text": button.text} for button in row] for row in keyboard],
+                "resize_keyboard": True,
+                "is_persistent": True,
+                "one_time_keyboard": False,
+                "input_field_placeholder": "Pilih menu paper bot...",
+            }
+        elif keyboard:
             body["reply_markup"] = {
                 "inline_keyboard": [
                     [
@@ -110,7 +125,7 @@ class TelegramBotAPI:
 
 @dataclass(slots=True)
 class RuntimeState:
-    """Minimal paper state view until the realtime PaperRunner owns this process."""
+    """Minimal paper state view until realtime trading owns this process."""
 
     started_at: float = field(default_factory=monotonic)
     balance: Decimal = Decimal("0")
@@ -156,7 +171,7 @@ class LogAuditSink(AuditSink):
 
 
 class TelegramPollingRuntime:
-    """Route updates with failure isolation and no credential logging."""
+    """Route Telegram updates with failure isolation and no credential logging."""
 
     def __init__(
         self,
@@ -180,7 +195,7 @@ class TelegramPollingRuntime:
                     await self.handle_update(update)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # boundary: Telegram failure must not crash runtime
+            except Exception as exc:
                 _LOG.warning("telegram_poll_error", error_type=type(exc).__name__)
                 await asyncio.sleep(2)
 
@@ -192,9 +207,20 @@ class TelegramPollingRuntime:
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         chat_id = int(message.get("chat", {}).get("id", 0))
-        text = str(message.get("text", ""))
+        raw_text = str(message.get("text", ""))
+        text = _MENU_COMMANDS.get(raw_text, raw_text)
         if chat_id not in self._allowed:
             _LOG.warning("telegram_unauthorized", chat_id=chat_id)
+            return
+        if text in {"/start", "/help"}:
+            reply = await self._readonly.handle(chat_id, text)
+            if reply is not None:
+                await self._api.send_message(
+                    chat_id,
+                    "🤖 BTC Paper Bot\nMode simulasi, tidak memakai uang nyata.\nPilih menu:",
+                    self.persistent_menu(),
+                    persistent=True,
+                )
             return
         action_reply = await self._actions.command(chat_id, text)
         if action_reply is not None and not action_reply.text.startswith("Unknown"):
@@ -202,7 +228,7 @@ class TelegramPollingRuntime:
             return
         reply = await self._readonly.handle(chat_id, text)
         if reply is not None:
-            await self._api.send_message(chat_id, reply.text, reply.keyboard)
+            await self._api.send_message(chat_id, reply.text)
 
     async def _handle_callback(self, query: dict[str, Any]) -> None:
         callback_id = str(query.get("id", ""))
@@ -220,7 +246,16 @@ class TelegramPollingRuntime:
         reply = await self._readonly.handle_callback(chat_id, data)
         if reply is not None:
             await self._api.answer_callback(callback_id, "OK")
-            await self._api.send_message(chat_id, reply.text, reply.keyboard)
+            await self._api.send_message(chat_id, reply.text)
+
+    @staticmethod
+    def persistent_menu() -> tuple[tuple[MenuButton, ...], ...]:
+        return (
+            (MenuButton("📊 Status", ""), MenuButton("💰 P&L", "")),
+            (MenuButton("📈 Positions", ""), MenuButton("🧾 Recent", "")),
+            (MenuButton("⏸ Pause", ""), MenuButton("▶️ Resume", "")),
+            (MenuButton("⚙️ Config", ""), MenuButton("🛑 KILL", "")),
+        )
 
     async def _send_action_reply(self, chat_id: int, reply: ActionReply) -> None:
         keyboard: tuple[tuple[MenuButton, ...], ...] = ()
