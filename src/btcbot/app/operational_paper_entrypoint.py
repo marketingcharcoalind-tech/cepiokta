@@ -2,8 +2,8 @@
 
 The command connects only to public/read-only Gamma, CLOB market WebSocket, and
 Chainlink sources. Paper execution is off by default and requires an explicit
-flag plus a confirmation phrase. No signer, private API, CLOB REST order, or
-live path exists here.
+flag, confirmation phrase, and a full round beginning at the next boundary.
+No signer, private API, CLOB REST order, or live path exists here.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 
 from btcbot.adapters.chainlink import FailoverPriceSource
 from btcbot.adapters.clob_ws import HttpClobWS
@@ -29,6 +30,7 @@ from btcbot.app.paper_notification_runtime import (
 )
 from btcbot.config.settings import Mode, Settings, get_settings
 from btcbot.data.store import Store
+from btcbot.domain.models import RoundMeta
 
 _EXECUTION_CONFIRMATION = "PAPER_ONLY"
 _MAX_EXECUTION_START_LAG_SECONDS = 2.0
@@ -74,38 +76,54 @@ def _assert_execution_opt_in(
     enabled: bool,
     confirmation: str,
     max_start_lag_seconds: float,
+    full_round: bool,
 ) -> None:
-    """Require deliberate paper-only opt-in and a trustworthy start-price window."""
+    """Require deliberate paper-only opt-in and a trustworthy full round."""
     if not enabled:
         return
     if confirmation != _EXECUTION_CONFIRMATION:
         raise RuntimeError("paper execution requires confirmation PAPER_ONLY")
     if max_start_lag_seconds > _MAX_EXECUTION_START_LAG_SECONDS:
         raise RuntimeError("paper execution requires max start lag <= 2 seconds")
+    if not full_round:
+        raise RuntimeError("paper execution requires --full-round")
 
 
-async def run_bounded_smoke(
+def _select_upcoming_round(rounds: list[RoundMeta], now: datetime) -> RoundMeta:
+    """Select the nearest not-yet-started round so start price is trustworthy."""
+    upcoming = [round_meta for round_meta in rounds if round_meta.start_time > now]
+    if not upcoming:
+        raise RuntimeError("Gamma did not return an upcoming round")
+    return min(upcoming, key=lambda round_meta: round_meta.start_time)
+
+
+async def run_bounded_smoke(  # noqa: PLR0913
     settings: Settings,
     *,
-    max_ticks: int,
+    max_ticks: int | None,
     max_start_lag_seconds: float = 2.0,
     paper_execution_enabled: bool = False,
     execution_confirmation: str = "",
-) -> tuple[int, int, bool, str | None]:
+    full_round: bool = False,
+) -> tuple[int, int, bool, str | None, bool | None]:
     """Run one bounded market observation and return report fields."""
     _assert_smoke_safe(settings)
     _assert_execution_opt_in(
         enabled=paper_execution_enabled,
         confirmation=execution_confirmation,
         max_start_lag_seconds=max_start_lag_seconds,
+        full_round=full_round,
     )
-    if max_ticks <= 0:
+    if max_ticks is not None and max_ticks <= 0:
         raise ValueError("max_ticks must be positive")
 
     clock = SystemClock()
     store = await Store.open(settings.db_url)
     gamma = HttpGammaClient(settings.gamma_base_url, clock=clock)
-    meta = await gamma.discover_active_round()
+    if paper_execution_enabled:
+        meta = _select_upcoming_round(await gamma.discover_rounds(), clock.now())
+    else:
+        meta = await gamma.discover_active_round()
     cache = LiveBookCache(meta.token_id_up, meta.token_id_down)
     stream = HttpClobWS(
         settings.clob_wss_url,
@@ -146,7 +164,13 @@ async def run_bounded_smoke(
     await service.start()
     try:
         report = await loop.run_round(meta, max_ticks=max_ticks)
-        return report.round_no, report.ticks, report.settled, report.skipped_reason
+        return (
+            report.round_no,
+            report.ticks,
+            report.settled,
+            report.skipped_reason,
+            report.reconciliation_ok,
+        )
     finally:
         await resources.close()
 
@@ -157,21 +181,25 @@ async def main_async(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-start-lag-seconds", type=float, default=2.0)
     parser.add_argument("--enable-paper-execution", action="store_true")
     parser.add_argument("--confirm-paper-execution", default="")
+    parser.add_argument("--full-round", action="store_true")
     args = parser.parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level)
+    max_ticks = None if args.full_round else args.max_ticks
     result = await run_bounded_smoke(
         settings,
-        max_ticks=args.max_ticks,
+        max_ticks=max_ticks,
         max_start_lag_seconds=args.max_start_lag_seconds,
         paper_execution_enabled=args.enable_paper_execution,
         execution_confirmation=args.confirm_paper_execution,
+        full_round=args.full_round,
     )
-    round_no, ticks, settled, reason = result
+    round_no, ticks, settled, reason, reconciliation_ok = result
     execution = "enabled" if args.enable_paper_execution else "disabled"
     print(  # noqa: T201 - intentional CLI smoke summary
         f"SMOKE round={round_no} ticks={ticks} settled={settled} "
-        f"reason={reason or 'none'} execution={execution}"
+        f"reason={reason or 'none'} execution={execution} "
+        f"reconciliation={reconciliation_ok}"
     )
     return 0
 
