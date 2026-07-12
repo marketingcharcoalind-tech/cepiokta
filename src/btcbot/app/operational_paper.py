@@ -112,9 +112,7 @@ class OperationalPaperLoop:
         config: OperationalLoopConfig | None = None,
     ) -> None:
         if settings.mode is not Mode.PAPER or settings.live_confirmed == "yes":
-            raise RuntimeError(
-                "operational loop is paper-only and requires LIVE_CONFIRMED=no"
-            )
+            raise RuntimeError("operational loop is paper-only and requires LIVE_CONFIRMED=no")
         self._settings = settings
         self._gamma = gamma
         self._stream = stream
@@ -133,7 +131,9 @@ class OperationalPaperLoop:
         meta = await self._gamma.discover_active_round()
         return await self.run_round(meta, max_ticks=max_ticks)
 
-    async def run_round(self, meta: RoundMeta, *, max_ticks: int | None = None) -> OperationalRoundReport:
+    async def run_round(
+        self, meta: RoundMeta, *, max_ticks: int | None = None
+    ) -> OperationalRoundReport:
         now = self._clock.now()
         if now < meta.start_time:
             await asyncio.sleep((meta.start_time - now).total_seconds())
@@ -152,25 +152,19 @@ class OperationalPaperLoop:
                 remediation="check Polygon RPC endpoints and Chainlink feed health",
             )
             self._runtime.risk.on_event(CircuitReason.PRICE_STALE)
-            return OperationalRoundReport(
-                round_no, 0, False, "start_price_unavailable"
-            )
+            return OperationalRoundReport(round_no, 0, False, "start_price_unavailable")
         if start_tick.stale:
             self._runtime.risk.on_event(CircuitReason.PRICE_STALE)
             return OperationalRoundReport(round_no, 0, False, "start_price_stale")
 
         rnd = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         await self._store.upsert_round(rnd)
-        consumer = asyncio.create_task(
-            self._consume_books(meta), name=f"paper-books-{round_no}"
-        )
+        consumer = asyncio.create_task(self._consume_books(meta), name=f"paper-books-{round_no}")
         ticks = 0
         try:
             while self._clock.now() < meta.end_time:
                 if max_ticks is not None and ticks >= max_ticks:
-                    return OperationalRoundReport(
-                        round_no, ticks, False, "smoke_limit"
-                    )
+                    return OperationalRoundReport(round_no, ticks, False, "smoke_limit")
                 await asyncio.sleep(self._config.tick_seconds)
                 books = self._books.market_book()
                 if books is None:
@@ -205,13 +199,9 @@ class OperationalPaperLoop:
             await self._runtime.report_error(
                 kind="Gamma resolution timeout",
                 detail=f"round {round_no} unresolved",
-                remediation=(
-                    "check Gamma API; keep entry halted until resolution is known"
-                ),
+                remediation=("check Gamma API; keep entry halted until resolution is known"),
             )
-            return OperationalRoundReport(
-                round_no, ticks, False, "resolution_timeout"
-            )
+            return OperationalRoundReport(round_no, ticks, False, "resolution_timeout")
         resolved = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         resolved = type(resolved)(
             resolved.condition_id,
@@ -226,18 +216,14 @@ class OperationalPaperLoop:
             resolved.status,
             outcome,
         )
-        await self._store.set_resolution(
-            round_no, outcome, resolution_source="gamma"
-        )
+        await self._store.set_resolution(round_no, outcome, resolution_source="gamma")
         await self._runtime.settle(resolved)
         return OperationalRoundReport(round_no, ticks, True)
 
     async def _consume_books(self, meta: RoundMeta) -> None:
         self._runtime.set_wss_status("reconnecting")
         try:
-            async for book in self._stream.stream_market(
-                [meta.token_id_up, meta.token_id_down]
-            ):
+            async for book in self._stream.stream_market([meta.token_id_up, meta.token_id_down]):
                 self._books.update(book)
                 self._runtime.set_wss_status("connected")
         except asyncio.CancelledError:
