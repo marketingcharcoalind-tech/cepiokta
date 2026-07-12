@@ -20,7 +20,13 @@ from btcbot.app.paper_runtime import OperationalPaperRuntime
 from btcbot.config.settings import Mode, Settings
 from btcbot.data.store import Store
 from btcbot.domain.fees import CryptoFeesV2
-from btcbot.domain.models import OrderBook, Outcome, PriceSource, RoundMeta, round_from_meta
+from btcbot.domain.models import (
+    OrderBook,
+    Outcome,
+    PriceSource,
+    RoundMeta,
+    round_from_meta,
+)
 from btcbot.domain.signal import SignalEngine
 from btcbot.domain.strategy import MarketBook
 from btcbot.risk.manager import CircuitReason
@@ -106,7 +112,9 @@ class OperationalPaperLoop:
         config: OperationalLoopConfig | None = None,
     ) -> None:
         if settings.mode is not Mode.PAPER or settings.live_confirmed == "yes":
-            raise RuntimeError("operational loop is paper-only and requires LIVE_CONFIRMED=no")
+            raise RuntimeError(
+                "operational loop is paper-only and requires LIVE_CONFIRMED=no"
+            )
         self._settings = settings
         self._gamma = gamma
         self._stream = stream
@@ -125,7 +133,7 @@ class OperationalPaperLoop:
         meta = await self._gamma.discover_active_round()
         return await self.run_round(meta, max_ticks=max_ticks)
 
-    async def run_round(
+    async def run_round(  # noqa: PLR0915
         self, meta: RoundMeta, *, max_ticks: int | None = None
     ) -> OperationalRoundReport:
         now = self._clock.now()
@@ -146,7 +154,9 @@ class OperationalPaperLoop:
                 remediation="check Polygon RPC endpoints and Chainlink feed health",
             )
             self._runtime.risk.on_event(CircuitReason.PRICE_STALE)
-            return OperationalRoundReport(round_no, 0, False, "start_price_unavailable")
+            return OperationalRoundReport(
+                round_no, 0, False, "start_price_unavailable"
+            )
         if start_tick.stale:
             self._runtime.risk.on_event(CircuitReason.PRICE_STALE)
             return OperationalRoundReport(round_no, 0, False, "start_price_stale")
@@ -160,7 +170,9 @@ class OperationalPaperLoop:
         try:
             while self._clock.now() < meta.end_time:
                 if max_ticks is not None and ticks >= max_ticks:
-                    return OperationalRoundReport(round_no, ticks, False, "smoke_limit")
+                    return OperationalRoundReport(
+                        round_no, ticks, False, "smoke_limit"
+                    )
                 await asyncio.sleep(self._config.tick_seconds)
                 books = self._books.market_book()
                 if books is None:
@@ -195,9 +207,13 @@ class OperationalPaperLoop:
             await self._runtime.report_error(
                 kind="Gamma resolution timeout",
                 detail=f"round {round_no} unresolved",
-                remediation="check Gamma API; keep entry halted until resolution is known",
+                remediation=(
+                    "check Gamma API; keep entry halted until resolution is known"
+                ),
             )
-            return OperationalRoundReport(round_no, ticks, False, "resolution_timeout")
+            return OperationalRoundReport(
+                round_no, ticks, False, "resolution_timeout"
+            )
         resolved = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         resolved = type(resolved)(
             resolved.condition_id,
@@ -212,7 +228,9 @@ class OperationalPaperLoop:
             resolved.status,
             outcome,
         )
-        await self._store.set_resolution(round_no, outcome, resolution_source="gamma")
+        await self._store.set_resolution(
+            round_no, outcome, resolution_source="gamma"
+        )
         await self._runtime.settle(resolved)
         return OperationalRoundReport(round_no, ticks, True)
 

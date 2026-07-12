@@ -54,10 +54,16 @@ class Gamma:
 class Stream:
     async def stream_market(self, token_ids: list[str]) -> AsyncIterator[OrderBook]:
         yield OrderBook(
-            token_ids[0], NOW, [], [BookLevel(Decimal("0.96"), Decimal("100"))]
+            token_ids[0],
+            NOW,
+            [],
+            [BookLevel(Decimal("0.96"), Decimal("100"))],
         )
         yield OrderBook(
-            token_ids[1], NOW, [], [BookLevel(Decimal("0.04"), Decimal("100"))]
+            token_ids[1],
+            NOW,
+            [],
+            [BookLevel(Decimal("0.04"), Decimal("100"))],
         )
         await asyncio.Event().wait()
         if False:
@@ -124,9 +130,7 @@ async def test_bounded_smoke_writes_only_paper_db(tmp_path: Path) -> None:
         await store.close()
 
 
-async def test_late_round_is_skipped_without_price_or_orders(
-    tmp_path: Path,
-) -> None:
+async def test_late_round_is_skipped_without_price_or_orders(tmp_path: Path) -> None:
     settings = _settings()
     store = await Store.open(str(tmp_path / "paper.db"))
     clock = SimClock(NOW)
