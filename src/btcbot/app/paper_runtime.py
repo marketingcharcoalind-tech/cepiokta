@@ -1,8 +1,8 @@
 """Shared composition root for the operational paper process.
 
 This module creates exactly one RiskManager and one paper ledger for OMS,
-reconciliation, and Telegram control. It is deliberately paper-only and contains
-no signer, private credential, CLOB REST order, or live execution path.
+reconciliation, Telegram control, and P&L/error notifications. It is deliberately
+paper-only and contains no signer, credential, CLOB REST order, or live path.
 """
 
 from __future__ import annotations
@@ -12,10 +12,11 @@ from decimal import Decimal
 from time import monotonic
 
 from btcbot.adapters.clock import Clock
-from btcbot.adapters.telegram import BotEvent
+from btcbot.adapters.telegram import BotEvent, Severity
 from btcbot.app.control import ControlFacade, ControlStatus, TelegramReadOnlyRouter
 from btcbot.app.control_actions import TelegramActionController
 from btcbot.app.paper import PaperLedger, PaperRunner, PaperTickResult
+from btcbot.app.paper_notifications import NotificationPolicy, PaperNotificationTracker
 from btcbot.app.reconcile import PaperReconciler, ReconciliationReport, ReconciliationSnapshot
 from btcbot.app.telegram_bot import LogAuditSink, TelegramAPI, TelegramPollingRuntime
 from btcbot.config.settings import Mode, Settings
@@ -32,7 +33,7 @@ _ZERO = Decimal("0")
 
 @dataclass(slots=True)
 class RuntimeEventBuffer:
-    """In-process critical-event sink; a Telegram notifier can consume later."""
+    """In-process event sink; production can inject TelegramNotifier instead."""
 
     events: list[BotEvent] = field(default_factory=list)
 
@@ -76,7 +77,7 @@ class PaperControlSource:
 
 
 class OperationalPaperRuntime:
-    """Paper core whose OMS, controls, reconciliation, and status share state."""
+    """Paper core whose OMS, controls, reconciliation, and alerts share state."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -88,6 +89,8 @@ class OperationalPaperRuntime:
         runner: PaperRunner,
         source: PaperControlSource,
         reconciler: PaperReconciler,
+        notifications: PaperNotificationTracker,
+        event_sink: RuntimeEventBuffer,
     ) -> None:
         self.settings = settings
         self.clock = clock
@@ -96,6 +99,8 @@ class OperationalPaperRuntime:
         self.runner = runner
         self.source = source
         self.reconciler = reconciler
+        self.notifications = notifications
+        self.event_sink = event_sink
 
     async def on_tick(self, rnd: Round, signal: Signal, books: MarketBook) -> PaperTickResult:
         return await self.runner.on_tick(rnd, signal, books)
@@ -103,10 +108,29 @@ class OperationalPaperRuntime:
     async def settle(self, rnd: Round) -> RoundResult:
         result = await self.runner.settle(rnd)
         self.source.record_result(result)
+        await self.notifications.on_result(result)
         return result
 
     async def reconcile(self, snapshot: ReconciliationSnapshot) -> ReconciliationReport:
         return await self.reconciler.reconcile(snapshot)
+
+    async def report_error(
+        self,
+        *,
+        kind: str,
+        detail: str,
+        remediation: str,
+        severity: Severity = Severity.CRITICAL,
+        action_required: bool = True,
+    ) -> bool:
+        """Emit a deduplicated actionable operator error via the shared sink."""
+        return await self.notifications.error(
+            kind=kind,
+            detail=detail,
+            remediation=remediation,
+            severity=severity,
+            action_required=action_required,
+        )
 
     def set_wss_status(self, status: str) -> None:
         """Update operator state and the shared WSS circuit breaker."""
@@ -150,8 +174,9 @@ def build_operational_paper_runtime(
     books: BookProvider,
     clock: Clock,
     event_buffer: RuntimeEventBuffer | None = None,
+    notification_policy: NotificationPolicy | None = None,
 ) -> OperationalPaperRuntime:
-    """Build the shared paper-only core; external market loops call ``on_tick``."""
+    """Build shared paper-only core; an external market loop calls ``on_tick``."""
     if settings.mode is not Mode.PAPER:
         raise RuntimeError("operational runtime requires MODE=paper")
     if settings.live_confirmed == "yes":
@@ -185,8 +210,14 @@ def build_operational_paper_runtime(
         clock=clock,
     )
     source = PaperControlSource(ledger, risk)
-    notifier = event_buffer or RuntimeEventBuffer()
-    reconciler = PaperReconciler(risk, notifier)
+    sink = event_buffer or RuntimeEventBuffer()
+    reconciler = PaperReconciler(risk, sink)
+    notifications = PaperNotificationTracker(
+        starting_balance=settings.paper_starting_balance,
+        sink=sink,
+        clock=clock,
+        policy=notification_policy,
+    )
     return OperationalPaperRuntime(
         settings=settings,
         clock=clock,
@@ -195,4 +226,6 @@ def build_operational_paper_runtime(
         runner=runner,
         source=source,
         reconciler=reconciler,
+        notifications=notifications,
+        event_sink=sink,
     )
