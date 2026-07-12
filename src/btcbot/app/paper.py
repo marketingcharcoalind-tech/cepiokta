@@ -7,7 +7,7 @@ and ``settle`` for Gamma-labelled round settlement. No live order API exists her
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -73,6 +73,14 @@ class PaperLedger:
     def position(self, round_no: int, token_id: str) -> PaperPosition | None:
         position = self._positions.get((round_no, token_id))
         return position if position is not None and position.size > _ZERO else None
+
+    def positions(self) -> tuple[Position, ...]:
+        """Return every open paper position as immutable domain snapshots."""
+        return tuple(
+            Position(item.round_no, item.token_id, item.size, item.average_price)
+            for item in self._positions.values()
+            if item.size > _ZERO
+        )
 
     def domain_position(self, round_no: int) -> Position | None:
         positions = [
@@ -230,7 +238,12 @@ class PaperRunner:
         if isinstance(decision, EnterOrder):
             order_book = books.for_outcome(Outcome(decision.outcome))
             depth = sum((level.size for level in order_book.asks), _ZERO)
-            order_size = size(signal, self._ledger.balance, depth, self._limits)
+            round_limits = replace(
+                self._limits,
+                min_order_size=rnd.min_order_size,
+                tick_size=rnd.tick_size,
+            )
+            order_size = size(signal, self._ledger.balance, depth, round_limits)
             action = RiskAction.ENTRY
         elif isinstance(decision, Hedge):
             order_size = position.size * decision.hedge_fraction if position is not None else _ZERO
