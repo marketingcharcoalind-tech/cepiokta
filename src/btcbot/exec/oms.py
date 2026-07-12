@@ -134,9 +134,7 @@ class PaperOMS:
         cost = _ZERO
         available_factor = _ONE - self._config.competition_fraction
         for level in levels:
-            within_limit = (
-                level.price <= request.price if is_buy else level.price >= request.price
-            )
+            within_limit = level.price <= request.price if is_buy else level.price >= request.price
             if not within_limit:
                 break
             available = level.size * available_factor
