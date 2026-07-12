@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -64,14 +65,14 @@ class PaperOMS:
         risk_manager: RiskManager,
         books: BookProvider,
         clock: Clock,
-        config: PaperOMSConfig = PaperOMSConfig(),
+        config: PaperOMSConfig | None = None,
     ) -> None:
         if mode is not Mode.PAPER:
             raise ValueError("PaperOMS requires MODE=paper")
         self._risk = risk_manager
         self._books = books
         self._clock = clock
-        self._config = config
+        self._config = config or PaperOMSConfig()
         self._results: dict[str, PaperExecution] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -169,11 +170,11 @@ class PaperOMS:
         )
         return PaperExecution(ack=ack, fills=fills, risk_decision=decision, reason=reason)
 
-    def _utc_now(self):  # type: ignore[no-untyped-def]
+    def _utc_now(self) -> datetime:
         now = self._clock.now()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("PaperOMS clock must return timezone-aware time")
-        return now
+        return now.astimezone(UTC)
 
     @staticmethod
     def _validate_book(book: OrderBook, token_id: str) -> None:
