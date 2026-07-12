@@ -17,14 +17,23 @@ from typing import Protocol
 from btcbot.adapters.chainlink import PriceUnavailableError
 from btcbot.adapters.clock import Clock
 from btcbot.app.paper_runtime import OperationalPaperRuntime
+from btcbot.app.reconcile import (
+    PaperOrderRecord,
+    PositionSnapshot,
+    ReconciliationReport,
+    ReconciliationSnapshot,
+)
 from btcbot.config.settings import Mode, Settings
 from btcbot.data.store import Store
 from btcbot.domain.fees import CryptoFeesV2
 from btcbot.domain.models import (
     OrderBook,
+    OrderRequest,
     Outcome,
+    Position,
     PriceSource,
     RoundMeta,
+    RoundResult,
     round_from_meta,
 )
 from btcbot.domain.signal import SignalEngine
@@ -63,6 +72,7 @@ class OperationalRoundReport:
     ticks: int
     settled: bool
     skipped_reason: str | None = None
+    reconciliation_ok: bool | None = None
 
 
 class LiveBookCache:
@@ -161,6 +171,7 @@ class OperationalPaperLoop:
         rnd = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         await self._store.upsert_round(rnd)
         consumer = asyncio.create_task(self._consume_books(meta), name=f"paper-books-{round_no}")
+        client_ids: list[str] = []
         ticks = 0
         try:
             while self._clock.now() < meta.end_time:
@@ -189,7 +200,9 @@ class OperationalPaperLoop:
                 )
                 await self._store.insert_signal(signal, mode="paper")
                 if self._config.paper_execution_enabled:
-                    await self._runtime.on_tick(rnd, signal, books)
+                    tick = await self._runtime.on_tick(rnd, signal, books)
+                    if tick.execution is not None:
+                        client_ids.append(tick.execution.ack.client_id)
                 ticks += 1
         finally:
             consumer.cancel()
@@ -204,6 +217,8 @@ class OperationalPaperLoop:
                 remediation=("check Gamma API; keep entry halted until resolution is known"),
             )
             return OperationalRoundReport(round_no, ticks, False, "resolution_timeout")
+
+        positions = self._position_snapshots(meta, self._runtime.ledger.positions())
         resolved = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         resolved = type(resolved)(
             resolved.condition_id,
@@ -219,8 +234,80 @@ class OperationalPaperLoop:
             outcome,
         )
         await self._store.set_resolution(round_no, outcome, resolution_source="gamma")
-        await self._runtime.settle(resolved)
-        return OperationalRoundReport(round_no, ticks, True)
+        result = await self._runtime.settle(resolved)
+        reconciliation = await self._reconcile_settlement(
+            meta=meta,
+            result=result,
+            positions=positions,
+            client_ids=client_ids,
+            resolved_outcome=outcome,
+        )
+        return OperationalRoundReport(
+            round_no,
+            ticks,
+            True,
+            reconciliation_ok=reconciliation.ok,
+        )
+
+    async def _reconcile_settlement(  # noqa: PLR0913
+        self,
+        *,
+        meta: RoundMeta,
+        result: RoundResult,
+        positions: tuple[PositionSnapshot, ...],
+        client_ids: list[str],
+        resolved_outcome: Outcome,
+    ) -> ReconciliationReport:
+        records: list[PaperOrderRecord] = []
+        for client_id in dict.fromkeys(client_ids):
+            row = await self._store.get_order(client_id)
+            if row is None:
+                continue
+            request = OrderRequest(
+                client_id=row.client_id,
+                token_id=row.token_id,
+                side=row.side,
+                price=row.price,
+                size=row.size,
+                order_type=row.order_type,
+            )
+            records.append(
+                PaperOrderRecord(
+                    request=request,
+                    order_id=row.order_id,
+                    status=row.status,
+                    fills=tuple(await self._store.get_fills(row.order_id)),
+                )
+            )
+        snapshot = ReconciliationSnapshot(
+            round_no=result.round_no,
+            resolved_outcome=resolved_outcome,
+            orders=tuple(records),
+            positions=positions,
+            result=result,
+            round_start_balance=result.balance_after - result.pnl,
+            actual_balance=result.balance_after,
+            ts=self._clock.now(),
+        )
+        return await self._runtime.reconcile(snapshot)
+
+    @staticmethod
+    def _position_snapshots(
+        meta: RoundMeta, positions: tuple[Position, ...]
+    ) -> tuple[PositionSnapshot, ...]:
+        outcomes = {
+            meta.token_id_up: Outcome.UP,
+            meta.token_id_down: Outcome.DOWN,
+        }
+        return tuple(
+            PositionSnapshot(
+                token_id=position.token_id,
+                outcome=outcomes[position.token_id],
+                size=position.size,
+            )
+            for position in positions
+            if position.token_id in outcomes
+        )
 
     async def _consume_books(self, meta: RoundMeta) -> None:
         self._runtime.set_wss_status("reconnecting")
