@@ -16,7 +16,7 @@ from btcbot.adapters.telegram import BotEvent, Severity
 from btcbot.app.control import ControlFacade, ControlStatus, TelegramReadOnlyRouter
 from btcbot.app.control_actions import TelegramActionController
 from btcbot.app.paper import PaperLedger, PaperRunner, PaperTickResult
-from btcbot.app.paper_notifications import NotificationPolicy, PaperNotificationTracker
+from btcbot.app.paper_notifications import EventSink, NotificationPolicy, PaperNotificationTracker
 from btcbot.app.reconcile import PaperReconciler, ReconciliationReport, ReconciliationSnapshot
 from btcbot.app.telegram_bot import LogAuditSink, TelegramAPI, TelegramPollingRuntime
 from btcbot.config.settings import Mode, Settings
@@ -90,7 +90,7 @@ class OperationalPaperRuntime:
         source: PaperControlSource,
         reconciler: PaperReconciler,
         notifications: PaperNotificationTracker,
-        event_sink: RuntimeEventBuffer,
+        event_sink: EventSink,
     ) -> None:
         self.settings = settings
         self.clock = clock
@@ -173,7 +173,7 @@ def build_operational_paper_runtime(  # noqa: PLR0913
     store: Store,
     books: BookProvider,
     clock: Clock,
-    event_buffer: RuntimeEventBuffer | None = None,
+    event_buffer: EventSink | None = None,
     notification_policy: NotificationPolicy | None = None,
 ) -> OperationalPaperRuntime:
     """Build shared paper-only core; an external market loop calls ``on_tick``."""
@@ -210,7 +210,7 @@ def build_operational_paper_runtime(  # noqa: PLR0913
         clock=clock,
     )
     source = PaperControlSource(ledger, risk)
-    sink = event_buffer or RuntimeEventBuffer()
+    sink: EventSink = event_buffer or RuntimeEventBuffer()
     reconciler = PaperReconciler(risk, sink)
     notifications = PaperNotificationTracker(
         starting_balance=settings.paper_starting_balance,
