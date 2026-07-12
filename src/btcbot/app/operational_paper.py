@@ -142,7 +142,7 @@ class OperationalPaperLoop:
         meta = await self._gamma.discover_active_round()
         return await self.run_round(meta, max_ticks=max_ticks)
 
-    async def run_round(
+    async def run_round(  # noqa: PLR0912
         self, meta: RoundMeta, *, max_ticks: int | None = None
     ) -> OperationalRoundReport:
         now = self._clock.now()
@@ -236,7 +236,6 @@ class OperationalPaperLoop:
         await self._store.set_resolution(round_no, outcome, resolution_source="gamma")
         result = await self._runtime.settle(resolved)
         reconciliation = await self._reconcile_settlement(
-            meta=meta,
             result=result,
             positions=positions,
             client_ids=client_ids,
@@ -249,10 +248,9 @@ class OperationalPaperLoop:
             reconciliation_ok=reconciliation.ok,
         )
 
-    async def _reconcile_settlement(  # noqa: PLR0913
+    async def _reconcile_settlement(
         self,
         *,
-        meta: RoundMeta,
         result: RoundResult,
         positions: tuple[PositionSnapshot, ...],
         client_ids: list[str],
