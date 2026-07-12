@@ -19,6 +19,11 @@ from btcbot.risk.manager import (
 NOW = datetime(2026, 7, 12, 16, 30, tzinfo=UTC)
 
 
+class NaiveClock:
+    def now(self) -> datetime:
+        return datetime(2026, 7, 12)
+
+
 def _limits(**overrides: object) -> RiskLimits:
     values: dict[str, object] = {
         "max_notional_round": Decimal("5"),
@@ -217,8 +222,7 @@ def test_naive_or_future_rate_limit_timestamp_fails_closed():
 
 
 def test_naive_clock_is_rejected():
-    manager = RiskManager(_limits(), SimClock(NOW))
-    manager._clock = type("NaiveClock", (), {"now": lambda self: datetime(2026, 7, 12)})()
+    manager = RiskManager(_limits(), NaiveClock())
     with pytest.raises(ValueError, match="timezone-aware"):
         manager.check(_order(), _state())
 
