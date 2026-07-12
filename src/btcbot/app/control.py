@@ -14,6 +14,10 @@ from typing import Protocol
 from btcbot.config.settings import Settings
 from btcbot.domain.models import Position, RoundResult
 
+_RECENT_DEFAULT = 5
+_RECENT_MAX = 20
+_RECENT_PARTS = 2
+
 
 @dataclass(frozen=True, slots=True)
 class ControlStatus:
@@ -31,14 +35,11 @@ class ControlStatus:
 class ControlDataSource(Protocol):
     """Read-only source implemented by the paper runtime."""
 
-    async def status(self) -> ControlStatus:
-        ...
+    async def status(self) -> ControlStatus: ...
 
-    async def positions(self) -> tuple[Position, ...]:
-        ...
+    async def positions(self) -> tuple[Position, ...]: ...
 
-    async def recent(self, limit: int) -> tuple[RoundResult, ...]:
-        ...
+    async def recent(self, limit: int) -> tuple[RoundResult, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +71,8 @@ class ControlFacade:
     async def positions(self) -> tuple[Position, ...]:
         return await self._source.positions()
 
-    async def recent(self, limit: int = 5) -> tuple[RoundResult, ...]:
-        if not 1 <= limit <= 20:
+    async def recent(self, limit: int = _RECENT_DEFAULT) -> tuple[RoundResult, ...]:
+        if not 1 <= limit <= _RECENT_MAX:
             raise ValueError("recent limit must be between 1 and 20")
         return await self._source.recent(limit)
 
@@ -104,7 +105,9 @@ class TelegramReadOnlyRouter:
         self._facade = facade
         self._allowed = frozenset(allowed_chat_ids)
 
-    async def handle(self, chat_id: int, text: str) -> CommandReply | None:
+    async def handle(  # noqa: PLR0911
+        self, chat_id: int, text: str
+    ) -> CommandReply | None:
         """Return None for unauthorized chats; never reveal workspace state."""
         if chat_id not in self._allowed:
             return None
@@ -175,20 +178,23 @@ class TelegramReadOnlyRouter:
         if not results:
             return "No settled paper rounds yet."
         return "\n".join(
-            f"#{result.round_no} {result.side_taken} pnl={result.pnl:+} balance={result.balance_after}"
+            (
+                f"#{result.round_no} {result.side_taken} "
+                f"pnl={result.pnl:+} balance={result.balance_after}"
+            )
             for result in results
         )
 
     @staticmethod
     def _parse_recent_limit(parts: list[str]) -> int:
         if len(parts) == 1:
-            return 5
-        if len(parts) != 2:
+            return _RECENT_DEFAULT
+        if len(parts) != _RECENT_PARTS:
             raise ValueError("usage: /recent [1-20]")
         try:
             limit = int(parts[1])
         except ValueError as exc:
             raise ValueError("usage: /recent [1-20]") from exc
-        if not 1 <= limit <= 20:
+        if not 1 <= limit <= _RECENT_MAX:
             raise ValueError("usage: /recent [1-20]")
         return limit
