@@ -21,7 +21,7 @@ NOW = datetime(2026, 7, 12, 16, 30, tzinfo=UTC)
 
 class NaiveClock:
     def now(self) -> datetime:
-        return datetime(2026, 7, 12)
+        return datetime(2026, 7, 12)  # noqa: DTZ001
 
 
 def _limits(**overrides: object) -> RiskLimits:
@@ -76,11 +76,11 @@ def _reason(decision: Allow | Veto) -> str:
     return decision.reason
 
 
-def test_allows_order_inside_every_limit():
+def test_allows_order_inside_every_limit() -> None:
     assert isinstance(_manager().check(_order(), _state()), Allow)
 
 
-def test_vetoes_round_notional_above_limit_but_allows_exact_limit():
+def test_vetoes_round_notional_above_limit_but_allows_exact_limit() -> None:
     manager = _manager()
     exact = manager.check(_order(price="1", size="1"), _state(round_notional=Decimal("4")))
     above = manager.check(
@@ -90,7 +90,7 @@ def test_vetoes_round_notional_above_limit_but_allows_exact_limit():
     assert _reason(above) == "max_notional_round"
 
 
-def test_vetoes_projected_open_exposure_above_limit():
+def test_vetoes_projected_open_exposure_above_limit() -> None:
     decision = _manager().check(
         _order(price="1", size="2"), _state(open_exposure=Decimal("9"))
     )
@@ -98,13 +98,13 @@ def test_vetoes_projected_open_exposure_above_limit():
 
 
 @pytest.mark.parametrize("size", ["5.0001", "6", "50", "500"])
-def test_invariant_order_above_notional_limit_never_passes(size: str):
+def test_invariant_order_above_notional_limit_never_passes(size: str) -> None:
     decision = _manager().check(_order(price="1", size=size), _state())
     assert isinstance(decision, Veto)
     assert decision.reason == "max_notional_round"
 
 
-def test_daily_loss_at_limit_latches_automatic_kill():
+def test_daily_loss_at_limit_latches_automatic_kill() -> None:
     manager = _manager()
     decision = manager.check(_order(), _state(balance=Decimal("95")))
     assert _reason(decision) == "kill_switch:max_daily_loss"
@@ -112,20 +112,20 @@ def test_daily_loss_at_limit_latches_automatic_kill():
     assert manager.should_halt()
 
 
-def test_balance_below_floor_latches_automatic_kill():
+def test_balance_below_floor_latches_automatic_kill() -> None:
     manager = _manager()
     decision = manager.check(_order(), _state(balance=Decimal("49.99")))
     assert _reason(decision) == "kill_switch:min_balance"
     assert manager.kill_reason == "min_balance"
 
 
-def test_consecutive_losses_at_limit_latch_automatic_kill():
+def test_consecutive_losses_at_limit_latch_automatic_kill() -> None:
     manager = _manager()
     decision = manager.check(_order(), _state(consecutive_losses=5))
     assert _reason(decision) == "kill_switch:max_consec_losses"
 
 
-def test_rate_limit_uses_rolling_utc_minute():
+def test_rate_limit_uses_rolling_utc_minute() -> None:
     timestamps = (
         NOW - timedelta(seconds=59),
         NOW - timedelta(seconds=30),
@@ -135,7 +135,7 @@ def test_rate_limit_uses_rolling_utc_minute():
     assert _reason(decision) == "max_orders_per_min"
 
 
-def test_order_exactly_sixty_seconds_old_is_outside_rate_window():
+def test_order_exactly_sixty_seconds_old_is_outside_rate_window() -> None:
     timestamps = (
         NOW - timedelta(seconds=60),
         NOW - timedelta(seconds=30),
@@ -146,14 +146,14 @@ def test_order_exactly_sixty_seconds_old_is_outside_rate_window():
     )
 
 
-def test_pause_blocks_entry_but_allows_exit():
+def test_pause_blocks_entry_but_allows_exit() -> None:
     manager = _manager()
     manager.pause()
     assert _reason(manager.check(_order(), _state())) == "paused"
     assert isinstance(manager.check(_order(action=RiskAction.EXIT), _state()), Allow)
 
 
-def test_resume_only_clears_manual_pause():
+def test_resume_only_clears_manual_pause() -> None:
     manager = _manager()
     manager.pause()
     manager.on_event(CircuitReason.PRICE_STALE)
@@ -174,7 +174,7 @@ def test_resume_only_clears_manual_pause():
         CircuitReason.LATENCY_BREACH,
     ],
 )
-def test_each_circuit_breaker_blocks_entry_and_can_clear(reason: CircuitReason):
+def test_each_circuit_breaker_blocks_entry_and_can_clear(reason: CircuitReason) -> None:
     manager = _manager()
     manager.on_event(reason)
     assert isinstance(manager.check(_order(), _state()), Veto)
@@ -183,7 +183,7 @@ def test_each_circuit_breaker_blocks_entry_and_can_clear(reason: CircuitReason):
     assert isinstance(manager.check(_order(), _state()), Allow)
 
 
-def test_reconciliation_mismatch_is_fatal_and_cannot_be_resumed():
+def test_reconciliation_mismatch_is_fatal_and_cannot_be_resumed() -> None:
     manager = _manager()
     manager.on_event(CircuitReason.RECONCILIATION_MISMATCH)
     manager.resume()
@@ -193,7 +193,7 @@ def test_reconciliation_mismatch_is_fatal_and_cannot_be_resumed():
     )
 
 
-def test_manual_kill_blocks_all_actions():
+def test_manual_kill_blocks_all_actions() -> None:
     manager = _manager()
     manager.kill("operator_request")
     assert _reason(manager.check(_order(), _state())) == "kill_switch:operator_request"
@@ -202,15 +202,15 @@ def test_manual_kill_blocks_all_actions():
     )
 
 
-def test_invalid_order_and_state_fail_closed():
+def test_invalid_order_and_state_fail_closed() -> None:
     assert _reason(_manager().check(_order(size="0"), _state())) == "invalid_order_value"
     assert _reason(
         _manager().check(_order(), _state(open_exposure=Decimal("-1")))
     ) == "invalid_risk_state"
 
 
-def test_naive_or_future_rate_limit_timestamp_fails_closed():
-    naive = datetime(2026, 7, 12, 16, 29)
+def test_naive_or_future_rate_limit_timestamp_fails_closed() -> None:
+    naive = datetime(2026, 7, 12, 16, 29)  # noqa: DTZ001
     assert _reason(
         _manager().check(_order(), _state(recent_order_timestamps=(naive,)))
     ) == "invalid_order_timestamp"
@@ -221,13 +221,13 @@ def test_naive_or_future_rate_limit_timestamp_fails_closed():
     ) == "future_order_timestamp"
 
 
-def test_naive_clock_is_rejected():
+def test_naive_clock_is_rejected() -> None:
     manager = RiskManager(_limits(), NaiveClock())
     with pytest.raises(ValueError, match="timezone-aware"):
         manager.check(_order(), _state())
 
 
-def test_invalid_limits_fail_fast():
+def test_invalid_limits_fail_fast() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         _limits(max_open_exposure=Decimal("-1"))
     with pytest.raises(ValueError, match="positive"):
