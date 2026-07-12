@@ -8,7 +8,6 @@ no signer, private credential, CLOB REST order, or live execution path.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC
 from decimal import Decimal
 from time import monotonic
 
@@ -18,11 +17,7 @@ from btcbot.app.control import ControlFacade, ControlStatus, TelegramReadOnlyRou
 from btcbot.app.control_actions import TelegramActionController
 from btcbot.app.paper import PaperLedger, PaperRunner, PaperTickResult
 from btcbot.app.reconcile import PaperReconciler, ReconciliationReport, ReconciliationSnapshot
-from btcbot.app.telegram_bot import (
-    LogAuditSink,
-    TelegramAPI,
-    TelegramPollingRuntime,
-)
+from btcbot.app.telegram_bot import LogAuditSink, TelegramAPI, TelegramPollingRuntime
 from btcbot.config.settings import Mode, Settings
 from btcbot.data.store import Store
 from btcbot.domain.fees import CryptoFeesV2
@@ -62,15 +57,7 @@ class PaperControlSource:
         self._wss_status = status
 
     async def status(self) -> ControlStatus:
-        today = self._utc_date()
-        pnl_today = sum(
-            (
-                result.pnl
-                for result in self._results
-                if result.round_no >= int(today.strftime("%s")) - int(today.strftime("%s"))
-            ),
-            _ZERO,
-        )
+        pnl_today = sum((result.pnl for result in self._results), _ZERO)
         return ControlStatus(
             mode="paper",
             uptime_seconds=int(monotonic() - self._started_at),
@@ -87,12 +74,6 @@ class PaperControlSource:
     async def recent(self, limit: int) -> tuple[RoundResult, ...]:
         return tuple(self._results[-limit:])
 
-    @staticmethod
-    def _utc_date():
-        from datetime import datetime
-
-        return datetime.now(UTC).date()
-
 
 class OperationalPaperRuntime:
     """Paper core whose OMS, controls, reconciliation, and status share state."""
@@ -101,6 +82,7 @@ class OperationalPaperRuntime:
         self,
         *,
         settings: Settings,
+        clock: Clock,
         risk: RiskManager,
         ledger: PaperLedger,
         runner: PaperRunner,
@@ -108,6 +90,7 @@ class OperationalPaperRuntime:
         reconciler: PaperReconciler,
     ) -> None:
         self.settings = settings
+        self.clock = clock
         self.risk = risk
         self.ledger = ledger
         self.runner = runner
@@ -146,21 +129,11 @@ class OperationalPaperRuntime:
         readonly = TelegramReadOnlyRouter(facade, allowed)
         actions = TelegramActionController(
             risk=self.risk,
-            clock=_RuntimeClockProxy(self.runner),
+            clock=self.clock,
             audit=LogAuditSink(),
             allowed_chat_ids=allowed,
         )
         return TelegramPollingRuntime(api, readonly, actions, allowed)
-
-
-class _RuntimeClockProxy:
-    """Clock proxy retained explicitly by the composition root."""
-
-    def __init__(self, runner: PaperRunner) -> None:
-        self._runner = runner
-
-    def now(self):
-        return self._runner._clock.now()  # noqa: SLF001
 
 
 def _resolve_delta_threshold(settings: Settings) -> Decimal:
@@ -216,6 +189,7 @@ def build_operational_paper_runtime(
     reconciler = PaperReconciler(risk, notifier)
     return OperationalPaperRuntime(
         settings=settings,
+        clock=clock,
         risk=risk,
         ledger=ledger,
         runner=runner,
