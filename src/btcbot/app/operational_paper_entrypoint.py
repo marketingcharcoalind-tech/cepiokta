@@ -31,6 +31,7 @@ from btcbot.config.settings import Mode, Settings, get_settings
 from btcbot.data.store import Store
 
 _EXECUTION_CONFIRMATION = "PAPER_ONLY"
+_MAX_EXECUTION_START_LAG_SECONDS = 2.0
 
 
 @dataclass(slots=True)
@@ -79,11 +80,11 @@ def _assert_execution_opt_in(
         return
     if confirmation != _EXECUTION_CONFIRMATION:
         raise RuntimeError("paper execution requires confirmation PAPER_ONLY")
-    if max_start_lag_seconds > 2:
+    if max_start_lag_seconds > _MAX_EXECUTION_START_LAG_SECONDS:
         raise RuntimeError("paper execution requires max start lag <= 2 seconds")
 
 
-async def run_bounded_smoke(  # noqa: PLR0913
+async def run_bounded_smoke(
     settings: Settings,
     *,
     max_ticks: int,
