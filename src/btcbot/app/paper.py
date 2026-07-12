@@ -90,7 +90,11 @@ class PaperLedger:
 
     def round_notional(self, round_no: int) -> Decimal:
         return sum(
-            (position.cost for position in self._positions.values() if position.round_no == round_no),
+            (
+                position.cost
+                for position in self._positions.values()
+                if position.round_no == round_no
+            ),
             _ZERO,
         )
 
@@ -156,7 +160,7 @@ class PaperLedger:
 class PaperRunner:
     """One-market paper orchestration core called by a realtime data loop."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         strategy: Strategy,
