@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -8,7 +9,6 @@ from btcbot.app.paper_runtime import build_operational_paper_runtime
 from btcbot.config.settings import Mode, Settings
 from btcbot.data.store import Store
 from btcbot.domain.models import (
-    BookLevel,
     MarketStatus,
     OrderBook,
     Outcome,
@@ -30,8 +30,9 @@ class Gamma:
 
 
 class Stream:
-    def stream_market(self, token_ids: list[str]):
-        raise NotImplementedError
+    async def stream_market(self, token_ids: list[str]) -> AsyncIterator[OrderBook]:
+        if False:
+            yield OrderBook(token_ids[0], NOW, [], [])
 
 
 class Price:
