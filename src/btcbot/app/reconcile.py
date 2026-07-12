@@ -94,7 +94,9 @@ class PaperReconciler:
         return report
 
     @staticmethod
-    def _find_mismatches(snapshot: ReconciliationSnapshot) -> list[str]:
+    def _find_mismatches(  # noqa: PLR0912
+        snapshot: ReconciliationSnapshot,
+    ) -> list[str]:
         mismatches: list[str] = []
         if snapshot.ts.tzinfo is None or snapshot.ts.utcoffset() is None:
             mismatches.append("naive_timestamp")
@@ -102,7 +104,9 @@ class PaperReconciler:
             mismatches.append("round_result_round_no")
 
         net_sizes: dict[str, Decimal] = {}
-        token_outcomes = {position.token_id: position.outcome for position in snapshot.positions}
+        token_outcomes = {
+            position.token_id: position.outcome for position in snapshot.positions
+        }
         for record in snapshot.orders:
             request = record.request
             filled = _ZERO
@@ -119,11 +123,17 @@ class PaperReconciler:
             if record.status == "FILLED" and abs(filled - request.size) > _EPSILON:
                 mismatches.append(f"filled_status_size:{record.order_id}")
             direction = Decimal("1") if request.side == "BUY" else Decimal("-1")
-            net_sizes[request.token_id] = net_sizes.get(request.token_id, _ZERO) + direction * filled
+            net_sizes[request.token_id] = (
+                net_sizes.get(request.token_id, _ZERO) + direction * filled
+            )
 
-        positions_by_token = {position.token_id: position.size for position in snapshot.positions}
+        positions_by_token = {
+            position.token_id: position.size for position in snapshot.positions
+        }
         for token_id in set(net_sizes) | set(positions_by_token):
-            if abs(net_sizes.get(token_id, _ZERO) - positions_by_token.get(token_id, _ZERO)) > _EPSILON:
+            actual_size = net_sizes.get(token_id, _ZERO)
+            recorded_size = positions_by_token.get(token_id, _ZERO)
+            if abs(actual_size - recorded_size) > _EPSILON:
                 mismatches.append(f"position_size:{token_id}")
 
         expected_settlement = sum(

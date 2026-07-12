@@ -25,14 +25,14 @@ class Events:
 
 
 def _risk() -> RiskManager:
-    limits = RiskLimits(
-        Decimal("5"), Decimal("10"), Decimal("5"), 5, Decimal("50"), 30
-    )
+    limits = RiskLimits(Decimal("5"), Decimal("10"), Decimal("5"), 5, Decimal("50"), 30)
     return RiskManager(limits, SimClock(NOW))
 
 
 def _snapshot() -> ReconciliationSnapshot:
-    request = OrderRequest("paper-1", "up", "BUY", Decimal("0.96"), Decimal("2"), "FOK")
+    request = OrderRequest(
+        "paper-1", "up", "BUY", Decimal("0.96"), Decimal("2"), "FOK"
+    )
     fill = Fill("paper:paper-1", "up", Decimal("0.96"), Decimal("2"), NOW)
     result = RoundResult(
         round_no=1,
