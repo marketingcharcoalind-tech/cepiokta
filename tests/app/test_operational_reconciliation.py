@@ -93,7 +93,6 @@ async def test_empty_settlement_reconciles_cleanly(tmp_path: Path) -> None:
     )
     try:
         report = await loop._reconcile_settlement(
-            meta=_meta(),
             result=result,
             positions=(),
             client_ids=[],
