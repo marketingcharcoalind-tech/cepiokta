@@ -30,9 +30,7 @@ def _risk() -> RiskManager:
 
 
 def _snapshot() -> ReconciliationSnapshot:
-    request = OrderRequest(
-        "paper-1", "up", "BUY", Decimal("0.96"), Decimal("2"), "FOK"
-    )
+    request = OrderRequest("paper-1", "up", "BUY", Decimal("0.96"), Decimal("2"), "FOK")
     fill = Fill("paper:paper-1", "up", Decimal("0.96"), Decimal("2"), NOW)
     result = RoundResult(
         round_no=1,
@@ -86,9 +84,7 @@ async def test_unknown_order_fill_is_detected() -> None:
     snapshot = _snapshot()
     bad_fill = replace(snapshot.orders[0].fills[0], order_id="unknown")
     bad_order = replace(snapshot.orders[0], fills=(bad_fill,))
-    report = await PaperReconciler(risk, events).reconcile(
-        replace(snapshot, orders=(bad_order,))
-    )
+    report = await PaperReconciler(risk, events).reconcile(replace(snapshot, orders=(bad_order,)))
     assert any(reason.startswith("unknown_order_fill") for reason in report.mismatches)
 
 
