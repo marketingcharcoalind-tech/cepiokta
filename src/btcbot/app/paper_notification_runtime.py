@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from btcbot.adapters.clock import Clock
 from btcbot.adapters.telegram import (
     TelegramHTTPTransport,
     TelegramNotifier,
     TelegramTransport,
 )
 from btcbot.app.paper_notifications import NotificationPolicy
+from btcbot.app.paper_runtime import OperationalPaperRuntime, build_operational_paper_runtime
 from btcbot.config.settings import Settings
+from btcbot.data.store import Store
+from btcbot.exec.oms import BookProvider
 
 
 class PaperNotificationConfig(BaseSettings):
@@ -88,3 +93,40 @@ def build_paper_notifier(
         chat_id=settings.telegram_notify_chat_id,
     )
     return TelegramNotifier(selected)
+
+
+@dataclass(slots=True)
+class NotifiedPaperRuntime:
+    """Lifecycle bundle: core and notifier start/stop as one service."""
+
+    core: OperationalPaperRuntime
+    notifier: TelegramNotifier
+
+    async def start(self) -> None:
+        await self.notifier.start()
+
+    async def stop(self, *, drain: bool = True) -> None:
+        await self.notifier.stop(drain=drain)
+
+
+def build_notified_paper_runtime(  # noqa: PLR0913
+    *,
+    settings: Settings,
+    store: Store,
+    books: BookProvider,
+    clock: Clock,
+    notification_config: PaperNotificationConfig | None = None,
+    transport: TelegramTransport | None = None,
+) -> NotifiedPaperRuntime:
+    """Wire paper settlement/reconciliation events to one real notifier queue."""
+    config = notification_config or PaperNotificationConfig()
+    notifier = build_paper_notifier(settings, transport=transport)
+    core = build_operational_paper_runtime(
+        settings=settings,
+        store=store,
+        books=books,
+        clock=clock,
+        event_buffer=notifier,
+        notification_policy=config.policy(),
+    )
+    return NotifiedPaperRuntime(core=core, notifier=notifier)
