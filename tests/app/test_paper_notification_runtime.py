@@ -1,22 +1,38 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from btcbot.adapters.clock import SimClock
 from btcbot.adapters.telegram import TelegramNotifier
 from btcbot.app.paper_notification_runtime import (
     PaperNotificationConfig,
+    build_notified_paper_runtime,
     build_paper_notifier,
 )
-from btcbot.config.settings import Settings
+from btcbot.config.settings import Mode, Settings
+from btcbot.data.store import Store
+from btcbot.domain.models import OrderBook
+
+NOW = datetime(2026, 7, 13, tzinfo=UTC)
 
 
 class Transport:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.closed = False
+
     async def send(self, text: str) -> None:
-        return None
+        self.sent.append(text)
 
     async def close(self) -> None:
-        return None
+        self.closed = True
+
+
+class Books:
+    async def get_orderbook(self, token_id: str) -> OrderBook:
+        return OrderBook(token_id, NOW, [], [])
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +54,17 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
 
 
+def _paper_settings() -> Settings:
+    return Settings(
+        mode=Mode.PAPER,
+        live_confirmed="no",
+        delta_threshold="50",
+        telegram_enabled=True,
+        telegram_bot_token="test-token",
+        telegram_notify_chat_id="123",
+    )
+
+
 def test_config_maps_to_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOTIFY_PNL_PER_TRADE", "false")
     monkeypatch.setenv("NOTIFY_PNL_LOSSES", "true")
@@ -57,10 +84,31 @@ def test_build_notifier_requires_enabled_telegram() -> None:
 
 
 def test_build_notifier_accepts_injected_transport() -> None:
-    settings = Settings(
-        telegram_enabled=True,
-        telegram_bot_token="test-token",
-        telegram_notify_chat_id="123",
-    )
-    notifier = build_paper_notifier(settings, transport=Transport())
+    notifier = build_paper_notifier(_paper_settings(), transport=Transport())
     assert isinstance(notifier, TelegramNotifier)
+
+
+async def test_notified_runtime_routes_actionable_error_to_transport(tmp_path: Path) -> None:
+    store = await Store.open(str(tmp_path / "paper.db"))
+    transport = Transport()
+    service = build_notified_paper_runtime(
+        settings=_paper_settings(),
+        store=store,
+        books=Books(),
+        clock=SimClock(NOW),
+        transport=transport,
+    )
+    try:
+        await service.start()
+        emitted = await service.core.report_error(
+            kind="WSS disconnected",
+            detail="reconnect failed",
+            remediation="check CLOB_WSS_URL and connectivity",
+        )
+        await service.stop(drain=True)
+        assert emitted is True
+        assert len(transport.sent) == 1
+        assert "ACTION REQUIRED" in transport.sent[0]
+        assert transport.closed is True
+    finally:
+        await store.close()
