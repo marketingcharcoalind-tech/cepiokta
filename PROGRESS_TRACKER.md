@@ -1,187 +1,127 @@
 # PROGRESS TRACKER — 5min-btc-polymarket
 
-> Update file ini setiap menyelesaikan satu PROMPT (lihat `PROMPT_GUIDE.md`).
-> Status: ⬜ belum · 🟦 sedang dikerjakan · ✅ selesai · ⛔ blocked · ⏭️ di-skip
+> Update setiap PROMPT selesai. Status: ⬜ belum · 🟦 berjalan · ✅ selesai · ⛔ blocked · ⏭️ defer/skip
 >
 > Mulai: `2026-06-25` | Target G3: `belum ditentukan`
 
----
+## Prasyarat
 
-## 🔑 Prasyarat
+| Item | Status | Catatan |
+|---|:--:|---|
+| Agent + GitHub + verifikasi VPS | ✅ | Semua klaim test harus dibuktikan output VPS |
+| Python 3.11 virtualenv | ✅ | `source venv/bin/activate`; jangan `uv run` |
+| Audit handoff/docs/spec/kode | ✅ | Selesai 2026-07-12 |
+| Wallet/USDC/API/private key live | ⬜ | Jangan disiapkan sebelum G2 + approval |
 
-| # | Item | Status | Catatan |
-|---|------|:------:|---------|
-| P1 | AI coding agent siap | ✅ | GitHub + verifikasi output VPS |
-| P2 | Repo + blueprint | ✅ | `marketingcharcoalind-tech/cepiokta` |
-| P3 | Python 3.11 virtualenv | ✅ | VPS: `source venv/bin/activate`, jangan `uv run` |
-| P4 | Kickoff/audit blueprint | ✅ | Handoff, docs, specs, kode dan commit diaudit 2026-07-12 |
-| P5 | Wallet/USDC/RPC live | ⬜ | Jangan disiapkan sebelum Fase 3 disetujui |
+## FASE 0 — Read-only (G0)
 
----
+| Prompt | Tugas | Status | Tanggal | Bukti |
+|:--:|---|:--:|---|---|
+| 0.1 | Tooling/CI | ✅ | 2026-06-25 | pytest, Ruff, Black, mypy |
+| 0.2 | Settings/MODE/secrets | ✅ | 2026-06-25 | Default readonly + live gate |
+| 0.3 | Clock | ✅ | 2026-06-25 | UTC-aware, injectable |
+| 0.4 | Gamma | ✅ | 2026-06-26 | Slug/window/fee/resolution |
+| 0.5 | CLOB WS market | ✅ | 2026-06-26 | `/ws/market`, reconnect/stale |
+| 0.6 | Chainlink | ✅ | 2026-06-26 | Data Feed + RPC failover |
+| 0.7 | Store/recorder/resolver | ✅ | 2026-06-26 | SQLite, Gamma outcome, LVCF |
+| 0.8 | Readonly runner | ✅ | 2026-06-27 | Soak nyata, no orders |
+| 0.7+ | Sizing/paper config | ✅ | 2026-06-27 | Kelly + caps |
 
-## 🟢 FASE 0 — Scaffolding & Read-only (G0)
+> **G0: ✅ LULUS.** Bukti safety terbaru 2026-07-13: readonly dataset `orders=0`, `fills=0`.
 
-| Prompt | Tugas | Modul | Status | DoD | Tanggal | Bukti |
-|:--:|---|---|:--:|:--:|---|---|
-| 0.1 | Tooling/CI | pyproject, CI | ✅ | ✅ | 2026-06-25 | pytest, Ruff, Black, mypy |
-| 0.2 | Settings/MODE/secrets | config/settings.py | ✅ | ✅ | 2026-06-25 | Default readonly, live gate |
-| 0.3 | Clock | adapters/clock.py | ✅ | ✅ | 2026-06-25 | UTC-aware, injectable |
-| 0.4 | Gamma | adapters/gamma.py | ✅ | ✅ | 2026-06-26 | Slug/window/fee/resolution |
-| 0.5 | CLOB WS market | adapters/clob_ws.py | ✅ | ✅ | 2026-06-26 | `/ws/market`, reconnect, stale |
-| 0.6 | Chainlink | adapters/chainlink.py | ✅ | ✅ | 2026-06-26 | Data Feed + RPC failover |
-| 0.7 | Store/recorder/resolver | data/* | ✅ | ✅ | 2026-06-26 | SQLite, Gamma outcome, LVCF |
-| 0.8 | Readonly runner | app/cli.py | ✅ | ✅ | 2026-06-27 | Soak nyata, no orders |
-| 0.7+ | Sizing/paper config | exec/sizing.py | ✅ | ✅ | 2026-06-27 | Kelly + caps |
+## FASE 1 — Backtest (G1)
 
-> **G0: ✅ LULUS.** Bukti safety terbaru 2026-07-13: `orders=0`, `fills=0`.
+| Prompt | Tugas | Status | Tanggal | Bukti |
+|:--:|---|:--:|---|---|
+| 1.1 | Interval loader | ✅ | 2026-06-27 | Pure + UTC |
+| 1.2 | Signal + fee | ✅ | 2026-06-27 | Net edge, fee 7% |
+| 1.3 | Strategy | ✅ | 2026-06-27 | Never-fade, entry/hedge/exit |
+| 1.4 | Sizing | ✅ | 2026-06-27 | Decimal + caps |
+| 1.5 | Replay/fill | ✅ | 2026-07-11 | Fee/slippage/competition/time latency |
+| 1.6 | Report/diagnostics | ✅ | 2026-07-12 | ALL5/OLD4/NEW, 50–1000 ms |
+| 1.7 | Pure-arb detector | ✅ | 2026-07-12 | Measurement selesai |
 
----
+**Directional G1: ✅ LANJUT PAPER, BUKAN LIVE.** Kandidat `t_entry=60`, `delta=50`, `min_price=0.96`, `max_price=0.99`, balance `500`. Baseline 84 entry, 83W/1L, `+$7.40`; tetap positif pada ALL5/OLD4/NEW hingga 1000 ms.
 
-## 🟡 FASE 1 — Backtest / Replay (G1)
+**Pure-arb execution: ⏭️ DEFER/STOP.** 462 episode, median 0 ms, max 2 ms; depth dan `$504.46` hanya upper-bound proxy. Jangan membuat two-leg OMS.
 
-| Prompt | Tugas | Modul | Status | DoD | Tanggal | Bukti |
-|:--:|---|---|:--:|:--:|---|---|
-| 1.1 | Interval loader | domain/market.py | ✅ | ✅ | 2026-06-27 | Pure, UTC |
-| 1.2 | Signal + fee | domain/signal.py, fees.py | ✅ | ✅ | 2026-06-27 | net edge, fee 7% |
-| 1.3 | Strategy | domain/strategy.py | ✅ | ✅ | 2026-06-27 | never-fade, entry/hedge/exit |
-| 1.4 | Sizing | exec/sizing.py | ✅ | ✅ | 2026-06-27 | Decimal + caps |
-| 1.5 | Replay/fill | backtest/replay.py | ✅ | ✅ | 2026-07-11 | fee, slippage, competition, time latency |
-| 1.6 | Report/diagnostics | backtest/* | ✅ | ✅ | 2026-07-12 | ALL5/OLD4/NEW, 50–1000 ms |
-| 1.7 | Pure-arb detector | arbitrage.py, arb_detector.py | ✅ | ✅ | 2026-07-12 | Measurement complete; execution defer |
-
-### G1 directional
-
-- ✅ Positif lintas ALL5, OLD4, NEW.
-- ✅ Positif setelah fee/slippage dan latency 50–1000 ms.
-- ✅ Kandidat: `t_entry=60`, `delta=50`, `min_price=0.96`, `max_price=0.99`, balance `500`.
-- Baseline tick-1: 84 entry, 83W/1L, `+$7.40`, ROI `+1.48%`.
-- Time latency ALL5: `+$6.48` sampai `+$8.32`.
-
-> **G1 directional: ✅ LANJUT KE PAPER, BUKAN LIVE.**
-
-### Pure-arb
-
-- ✅ 1.618 ronde, 462 episode.
-- LVCF duration p25/median/p75 `0/0/0 ms`, max `2 ms`.
-- `$504.46` dan depth adalah upper-bound proxy, bukan executable profit.
-
-> **Pure-arb execution: ⏭️ DEFER/STOP.** Jangan membuat two-leg OMS.
-
----
-
-## 🟠 FASE 2 — Paper Trading (G2)
+## FASE 2 — Paper Trading (G2)
 
 | Prompt | Tugas | Modul | Status | DoD | Tanggal | Bukti |
 |:--:|---|---|:--:|:--:|---|---|
-| 2.1 | Risk Manager | risk/manager.py | ✅ | ✅ | 2026-07-13 | 27/27 VPS; Ruff/Black/mypy; 0/0 |
-| 2.2 | Paper OMS | exec/oms.py | ✅ | ✅ | 2026-07-13 | 41/41 gabungan risk+OMS; Ruff/Black/mypy; 0/0 |
-| 2.3 | Paper runner + ledger | app/paper.py | ⬜ | ⬜ | | Berikutnya |
-| 2.4 | Reconciliation + alert | reconcile + alert | ⬜ | ⬜ | | Mismatch freeze |
+| 2.1 | Risk Manager | `risk/manager.py` | ✅ | ✅ | 2026-07-13 | 27/27 VPS + Ruff/Black/mypy + 0/0 |
+| 2.2 | Paper OMS | `exec/oms.py` | ✅ | ✅ | 2026-07-13 | 41/41 gabungan + quality gates + 0/0 |
+| 2.3 | Paper runner + ledger | `app/paper.py` | ✅ | ✅ | 2026-07-13 | 46/46 gabungan + Ruff/Black/mypy + 0/0 |
+| T.1 | Telegram notifier push | `adapters/telegram.py` | ⬜ | ⬜ | | Berikutnya sesuai urutan |
+| 2.4 | Reconciliation + alert | reconcile/alert | ⬜ | ⬜ | | Mismatch harus freeze |
+| T.2 | Telegram read-only commands | `app/control.py` | ⬜ | ⬜ | | Setelah ledger/status stabil |
+| T.3 | Telegram pause/resume/kill | control + risk | ⬜ | ⬜ | | Setelah 2.4, sebelum Gate G2 |
 
-### Prompt 2.1 selesai
+### Prompt 2.1
 
-✅ notional/round · exposure · daily loss · loss streak · min balance · rolling rate limit · pause/resume · kill · WSS/stale/clock/spread/liquidity/latency breaker · mismatch fatal · fail-closed.
+✅ hard limits · rolling rate limit · pause/resume · kill · breakers · reconciliation mismatch fatal · fail-closed.
 
-### Prompt 2.2 selesai
+### Prompt 2.2
 
-✅ MODE harus paper · ✅ setiap submit lewat Risk Manager · ✅ FOK all-or-nothing · ✅ FAK partial · ✅ BUY asks/SELL bids level-walk · ✅ price limit · ✅ competition fraction · ✅ configurable latency · ✅ idempotent client ID · ✅ UTC-aware · ✅ GTC ditolak · ✅ tidak ada CLOB REST/signer/secret/live path.
+✅ paper-only mode · RiskManager wajib · FOK/FAK · slippage level-walk · competition · latency · idempotency · UTC · no CLOB REST/signer/secret/live.
+
+### Prompt 2.3
+
+✅ signal → strategy → sizing → risk → Paper OMS · ✅ paper orders/fills persistence · ✅ Decimal ledger · ✅ fee 7% net-of-fee · ✅ entry/position/settlement Gamma · ✅ win/loss PnL · ✅ `round_results` + `equity_curve` mode paper · ✅ unresolved round fail-closed · ✅ readonly dataset tetap 0/0.
 
 **GATE G2:** ⬜ ratusan ronde paper · ⬜ PnL konsisten backtest · ⬜ nol mismatch.
 
-> **G2: 🟦 DIMULAI, 2/4 prompt selesai. Live tetap dilarang.**
+> **G2: 🟦 DIMULAI. Core 3/4 prompt selesai; Telegram cross-cutting belum. Live tetap dilarang.**
 
----
+## TELEGRAM CONTROL PLANE
 
-## 🔴 FASE 3 — Live Micro (G3) ⚠️ UANG NYATA
+Urutan: `T.1 → 2.4 → T.2 → T.3 → Gate G2`.
 
-| Prompt | Tugas | Status | Catatan |
-|:--:|---|:--:|---|
-| 3.1 | Signer EIP-712/auth | ⛔ | Dilarang sebelum G2 + approval |
-| 3.2 | OMS live | ⛔ | Dilarang sebelum G2 |
-| 3.3 | Live limits/gate | ⛔ | `LIVE_CONFIRMED` belum boleh |
-| 3.4 | Monitoring | ⬜ | Setelah paper stabil |
-| 3.5 | Live runner | ⛔ | Jangan dibuat sekarang |
+| Item | Status |
+|---|:--:|
+| BotFather/token baru | ⬜ |
+| Chat ID + whitelist | ⬜ |
+| Env VPS tanpa commit/log token | ⬜ |
+| Whitelist test | ⬜ |
+| Confirm kill 2 langkah | ⬜ |
+| Telegram down tidak stop core | ⬜ |
+| P&L/error/drawdown notifications | ⬜ |
 
-Checklist: ⬜ CLOB REST V2 · ⬜ EIP-712 V2 · ✅ WSS market · 🟦 Chainlink Data Streams · ✅ fee/tick/min size · ⬜ compliance.
+## FASE 3 — Live Micro (G3)
 
-> **G3: ⛔ BELUM BOLEH.**
+| Prompt | Status | Catatan |
+|:--:|:--:|---|
+| 3.1 Signer EIP-712 | ⛔ | Dilarang sebelum G2 + approval |
+| 3.2 OMS live | ⛔ | Dilarang sebelum G2 |
+| 3.3 Live gate/limits | ⛔ | `LIVE_CONFIRMED` belum boleh |
+| 3.4 Monitoring | ⬜ | Setelah paper stabil |
+| 3.5 Live runner | ⛔ | Jangan dibuat sekarang |
 
----
-
-## 🟣 FASE 4 — Hardening & Scale
-
-| Prompt | Tugas | Status |
-|:--:|---|:--:|
-| 4.1 | Deploy/failover | ⬜ |
-| 4.2 | Tuning + ADR | ⬜ |
-| 4.3 | Scale bersyarat | ⬜ |
-
----
-
-## 📊 Status Ringkas
+## Status Ringkas
 
 ```text
 Fase 0 [##########] 9/9  G0: ✅ LULUS
 Fase 1 [##########] 7/7  G1 directional: ✅ LANJUT PAPER
 Pure-arb                         : ✅ diukur, ⏭️ execution defer
-Fase 2 [#####     ] 2/4  G2: 🟦 dimulai
+Fase 2 [########  ] 3/4  core: 2.1–2.3 ✅, T.1/2.4/T.2/T.3 tersisa
 Fase 3 [          ] 0/5  G3: ⛔ belum boleh
 Fase 4 [          ] 0/3  G4: ⬜ belum
 ```
 
----
+## Blocker / Risiko Aktif
 
-## ⛔ Blocker / Risiko Aktif
+| # | Deskripsi | Status |
+|---|---|:--:|
+| TD1 | Full repo baseline masih punya 5 test lama gagal + lint/mypy debt, bukan regresi 2.1–2.3 | 🟦 |
+| WD1 | VPS punya modifikasi lokal dan output analisis; jangan `git add .`, reset, atau clean | 🟦 |
+| B1 | CLOB REST V2/EIP-712 belum verified, blokir live | ⛔ |
+| B2b | Chainlink Data Streams belum ada | 🟦 |
+| DATA1 | Recorder hanya best price + aggregate depth | 🟦 |
+| G1R1 | NEW split kecil, perlu ratusan ronde paper | 🟦 |
+| G1R2 | Satu loss; exit warning false positive | 🟦 |
+| SEC1 | Telegram token/GitHub PAT lama pernah terpapar, revoke/rotate jika belum | 🟦 |
 
-| # | Deskripsi | Dampak/Rencana | Status |
-|---|---|---|:--:|
-| TD1 | Full repo baseline: 5 test lama gagal + lint/mypy debt | Cleanup terpisah sebelum gate proyek; bukan regresi 2.1/2.2 | 🟦 |
-| WD1 | VPS punya modifikasi lokal dan output analisis | Jangan `git add .`, reset, atau clean | 🟦 |
-| B1 | CLOB REST V2/EIP-712 belum verified | Blokir live | ⛔ |
-| B2b | Chainlink Data Streams belum ada | Basis-risk sebelum live | 🟦 |
-| DATA1 | Recorder best price + aggregate depth | Paper ukur fill; full-depth terpisah | 🟦 |
-| G1R1 | NEW split kecil | Validasi ratusan ronde paper | 🟦 |
-| G1R2 | Satu loss, warning false positive | Ukur hedge/exit paper | 🟦 |
-| SEC1 | Telegram token/GitHub PAT lama pernah terpapar | Revoke/rotate jika belum | 🟦 |
-
----
-
-## 📱 TELEGRAM CONTROL PLANE
-
-| Prompt | Tugas | Status | Urutan |
-|:--:|---|:--:|---|
-| T.1 | Notifier push | ⬜ | Setelah 2.3 |
-| T.2 | Command/tombol read-only | ⬜ | Setelah ledger/status stabil |
-| T.3 | pause/resume/kill | ⬜ | Setelah 2.4, sebelum Gate G2 |
-
-**Urutan:** `2.3 → T.1 → 2.4 → T.2 → T.3 → Gate G2`.
-
-Setup: ⬜ BotFather · ⬜ chat ID/whitelist · ⬜ env VPS tanpa commit/log token.
-Gate: ⬜ whitelist · ⬜ confirm 2 langkah · ⬜ Telegram down tidak stop core · ⬜ token tidak ter-log.
-
----
-
-## 📊 Notifikasi P&L/Error
-
-⬜ win/loss · ⬜ milestone/equity high · ⬜ streak/drawdown/daily loss · ⬜ summary · ⬜ ACTION REQUIRED/remediation · ⬜ dedup/mute bypass · ⬜ tests.
-
----
-
-## 🧠 Strategi dan Multi-market
-
-| Item | Status | Catatan |
-|---|:--:|---|
-| S.1 Fair-value taker | ✅ | G1 lanjut paper |
-| S.2 Delta hedge | ⏭️ | Setelah #1 live terbukti |
-| S.2b Pure lock pair | ⏭️ | Measurement selesai, execution defer |
-| S.3 Market making | ⏭️ | Butuh latency rendah |
-| M.1–M.4 Multi-market | ⬜ | Fase 4, BTC 5m dahulu |
-
-Aktivasi: 🟦 BTC 5m paper · ⬜ BTC 15m · ⬜ ETH 5m · ⬜ ETH 15m · ⬜ SOL 5m · ⬜ SOL 15m.
-
----
-
-## 🧠 Decision Log
+## Decision Log
 
 | Tanggal | Keputusan | Alasan |
 |---|---|---|
@@ -189,5 +129,6 @@ Aktivasi: 🟦 BTC 5m paper · ⬜ BTC 15m · ⬜ ETH 5m · ⬜ ETH 15m · ⬜ S
 | 2026-07-11 | Time-based latency | Event tick bukan durasi stabil |
 | 2026-07-12 | G1 directional lanjut paper | Positif lintas split hingga 1000 ms |
 | 2026-07-12 | Pure-arb execution defer | Median 0 ms, max 2 ms |
-| 2026-07-13 | Prompt 2.1 selesai | 27/27 + quality gate + 0/0 |
-| 2026-07-13 | Prompt 2.2 selesai | 41/41 + quality gate + 0/0; paper-only |
+| 2026-07-13 | Prompt 2.1 selesai | 27/27 + quality + 0/0 |
+| 2026-07-13 | Prompt 2.2 selesai | 41/41 + quality + 0/0 |
+| 2026-07-13 | Prompt 2.3 selesai | 46/46 + quality + 0/0 |
