@@ -104,9 +104,7 @@ class PaperReconciler:
             mismatches.append("round_result_round_no")
 
         net_sizes: dict[str, Decimal] = {}
-        token_outcomes = {
-            position.token_id: position.outcome for position in snapshot.positions
-        }
+        token_outcomes = {position.token_id: position.outcome for position in snapshot.positions}
         for record in snapshot.orders:
             request = record.request
             filled = _ZERO
@@ -127,9 +125,7 @@ class PaperReconciler:
                 net_sizes.get(request.token_id, _ZERO) + direction * filled
             )
 
-        positions_by_token = {
-            position.token_id: position.size for position in snapshot.positions
-        }
+        positions_by_token = {position.token_id: position.size for position in snapshot.positions}
         for token_id in set(net_sizes) | set(positions_by_token):
             actual_size = net_sizes.get(token_id, _ZERO)
             recorded_size = positions_by_token.get(token_id, _ZERO)
