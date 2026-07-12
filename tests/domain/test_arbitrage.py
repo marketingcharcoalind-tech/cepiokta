@@ -50,7 +50,11 @@ def test_empty_book_rejected():
 
 
 def test_edge_and_depth_rejections():
-    edge = _detect(_book("up", "0.50"), _book("down", "0.50"))
+    edge = _detect(
+        _book("up", "0.50"),
+        _book("down", "0.49"),
+        min_lock_edge=Decimal("0.02"),
+    )
     assert edge.reject_reason == REJECT_EDGE_LOW
     depth = _detect(_book("up", "0.45", "2"), _book("down", "0.45", "3"))
     assert depth.reject_reason == REJECT_DEPTH_LOW

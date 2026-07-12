@@ -17,7 +17,12 @@ def _book(token: str, ts: datetime, ask: str) -> OrderBook:
 
 def _tick(offset_ms: int, up: str, down: str) -> ReplayTick:
     ts = _BASE + timedelta(milliseconds=offset_ms)
-    return ReplayTick(ts, Decimal("100000"), _book("up", ts, up), _book("down", ts, down))
+    return ReplayTick(
+        ts,
+        Decimal("100000"),
+        _book("up", ts, up),
+        _book("down", ts, down),
+    )
 
 
 def _config() -> ArbDetectorConfig:
@@ -56,7 +61,5 @@ def test_invalid_tick_splits_episodes():
 
 
 def test_theoretical_pnl_is_capped_by_depth():
-    episodes, _, _, _ = detect_round_episodes(
-        7, [_tick(0, "0.45", "0.45")], _config()
-    )
+    episodes, _, _, _ = detect_round_episodes(7, [_tick(0, "0.45", "0.45")], _config())
     assert episodes[0].theoretical_pnl == Decimal("1.00")
