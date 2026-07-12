@@ -2,7 +2,10 @@ from decimal import Decimal
 
 import pytest
 
-from btcbot.app.operational_paper_entrypoint import _assert_smoke_safe
+from btcbot.app.operational_paper_entrypoint import (
+    _assert_execution_opt_in,
+    _assert_smoke_safe,
+)
 from btcbot.config.settings import Mode, Settings
 
 
@@ -42,6 +45,36 @@ def test_smoke_safety_rejects_any_private_credentials() -> None:
 
 
 def test_smoke_safety_rejects_non_paper_database() -> None:
-    settings = _safe_settings().model_copy(update={"db_url": "sqlite+aiosqlite:///./btcbot.db"})
+    settings = _safe_settings().model_copy({"db_url": "sqlite+aiosqlite:///./btcbot.db"})
     with pytest.raises(RuntimeError, match=r"paper\.db"):
         _assert_smoke_safe(settings)
+
+
+def test_execution_is_off_without_opt_in() -> None:
+    _assert_execution_opt_in(enabled=False, confirmation="", max_start_lag_seconds=300)
+
+
+def test_execution_requires_exact_confirmation() -> None:
+    with pytest.raises(RuntimeError, match="PAPER_ONLY"):
+        _assert_execution_opt_in(
+            enabled=True,
+            confirmation="wrong",
+            max_start_lag_seconds=2,
+        )
+
+
+def test_execution_rejects_late_start_allowance() -> None:
+    with pytest.raises(RuntimeError, match="<= 2"):
+        _assert_execution_opt_in(
+            enabled=True,
+            confirmation="PAPER_ONLY",
+            max_start_lag_seconds=3,
+        )
+
+
+def test_execution_accepts_double_opt_in_at_strict_start() -> None:
+    _assert_execution_opt_in(
+        enabled=True,
+        confirmation="PAPER_ONLY",
+        max_start_lag_seconds=2,
+    )
