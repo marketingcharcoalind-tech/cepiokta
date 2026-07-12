@@ -48,6 +48,7 @@ class OperationalLoopConfig:
     max_start_lag_seconds: float = 2.0
     resolution_poll_seconds: float = 2.0
     max_resolution_attempts: int = 90
+    paper_execution_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.tick_seconds <= 0 or self.max_start_lag_seconds < 0:
@@ -187,7 +188,8 @@ class OperationalPaperLoop:
                     book_down=books.down,
                 )
                 await self._store.insert_signal(signal, mode="paper")
-                await self._runtime.on_tick(rnd, signal, books)
+                if self._config.paper_execution_enabled:
+                    await self._runtime.on_tick(rnd, signal, books)
                 ticks += 1
         finally:
             consumer.cancel()
