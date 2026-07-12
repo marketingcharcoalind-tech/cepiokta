@@ -125,7 +125,7 @@ class OperationalPaperLoop:
         meta = await self._gamma.discover_active_round()
         return await self.run_round(meta, max_ticks=max_ticks)
 
-    async def run_round(  # noqa: PLR0915
+    async def run_round(
         self, meta: RoundMeta, *, max_ticks: int | None = None
     ) -> OperationalRoundReport:
         now = self._clock.now()
@@ -153,7 +153,9 @@ class OperationalPaperLoop:
 
         rnd = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         await self._store.upsert_round(rnd)
-        consumer = asyncio.create_task(self._consume_books(meta), name=f"paper-books-{round_no}")
+        consumer = asyncio.create_task(
+            self._consume_books(meta), name=f"paper-books-{round_no}"
+        )
         ticks = 0
         try:
             while self._clock.now() < meta.end_time:
