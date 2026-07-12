@@ -78,7 +78,7 @@ class PaperControlSource:
 class OperationalPaperRuntime:
     """Paper core whose OMS, controls, reconciliation, and status share state."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         settings: Settings,
