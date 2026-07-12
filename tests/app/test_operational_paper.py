@@ -124,7 +124,9 @@ async def test_bounded_smoke_writes_only_paper_db(tmp_path: Path) -> None:
         await store.close()
 
 
-async def test_late_round_is_skipped_without_price_or_orders(tmp_path: Path) -> None:
+async def test_late_round_is_skipped_without_price_or_orders(
+    tmp_path: Path,
+) -> None:
     settings = _settings()
     store = await Store.open(str(tmp_path / "paper.db"))
     clock = SimClock(NOW)
