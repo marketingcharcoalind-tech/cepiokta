@@ -101,10 +101,7 @@ class TelegramBotAPI:
         elif keyboard:
             body["reply_markup"] = {
                 "inline_keyboard": [
-                    [
-                        {"text": button.text, "callback_data": button.callback_data}
-                        for button in row
-                    ]
+                    [{"text": button.text, "callback_data": button.callback_data} for button in row]
                     for row in keyboard
                 ]
             }
