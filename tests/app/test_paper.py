@@ -1,5 +1,7 @@
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -49,39 +51,87 @@ def _round(outcome: Outcome | None = Outcome.UP) -> Round:
 
 
 def _signal() -> Signal:
-    return Signal(1, NOW, Decimal("100100"), Decimal("100"), 30.0, Decimal("0.999"), "UP", Decimal("0.96"), Decimal("0.03"))
+    return Signal(
+        1,
+        NOW,
+        Decimal("100100"),
+        Decimal("100"),
+        30.0,
+        Decimal("0.999"),
+        "UP",
+        Decimal("0.96"),
+        Decimal("0.03"),
+    )
 
 
 def _strategy() -> Strategy:
     return Strategy(
-        StrategyParams(60, Decimal("50"), Decimal("0.96"), Decimal("0.99"), Decimal("0.01"), Decimal("0.90"), Decimal("0.5"), Decimal("0.65"))
+        StrategyParams(
+            60,
+            Decimal("50"),
+            Decimal("0.96"),
+            Decimal("0.99"),
+            Decimal("0.01"),
+            Decimal("0.90"),
+            Decimal("0.5"),
+            Decimal("0.65"),
+        )
     )
 
 
 def _sizing() -> SizingLimits:
-    return SizingLimits(Decimal("0.25"), Decimal("5"), Decimal("0.02"), Decimal("0.8"), Decimal("0.01"), Decimal("0.99"), Decimal("1"), Decimal("0.01"))
+    return SizingLimits(
+        Decimal("0.25"),
+        Decimal("5"),
+        Decimal("0.02"),
+        Decimal("0.8"),
+        Decimal("0.01"),
+        Decimal("0.99"),
+        Decimal("1"),
+        Decimal("0.01"),
+    )
 
 
 def _risk(clock: SimClock) -> RiskManager:
-    return RiskManager(RiskLimits(Decimal("5"), Decimal("10"), Decimal("5"), 5, Decimal("50"), 30), clock)
+    limits = RiskLimits(
+        Decimal("5"), Decimal("10"), Decimal("5"), 5, Decimal("50"), 30
+    )
+    return RiskManager(limits, clock)
 
 
 @pytest.fixture
-async def setup_runner(tmp_path):  # type: ignore[no-untyped-def]
+async def setup_runner(
+    tmp_path: Path,
+) -> AsyncGenerator[tuple[PaperRunner, PaperLedger, Store, MarketBook]]:
     clock = SimClock(NOW)
     market = _market()
     store = await Store.open(str(tmp_path / "paper.db"))
     fee = CryptoFeesV2()
     ledger = PaperLedger(Decimal("500"), fee)
-    oms = PaperOMS(mode=Mode.PAPER, risk_manager=_risk(clock), books=Books(market), clock=clock, config=PaperOMSConfig(latency_ms=0))
-    runner = PaperRunner(strategy=_strategy(), limits=_sizing(), oms=oms, ledger=ledger, store=store, clock=clock)
+    oms = PaperOMS(
+        mode=Mode.PAPER,
+        risk_manager=_risk(clock),
+        books=Books(market),
+        clock=clock,
+        config=PaperOMSConfig(latency_ms=0),
+    )
+    runner = PaperRunner(
+        strategy=_strategy(),
+        limits=_sizing(),
+        oms=oms,
+        ledger=ledger,
+        store=store,
+        clock=clock,
+    )
     try:
         yield runner, ledger, store, market
     finally:
         await store.close()
 
 
-async def test_entry_flows_through_oms_and_persists(setup_runner) -> None:  # type: ignore[no-untyped-def]
+async def test_entry_flows_through_oms_and_persists(
+    setup_runner: tuple[PaperRunner, PaperLedger, Store, MarketBook],
+) -> None:
     runner, ledger, store, market = setup_runner
     tick = await runner.on_tick(_round(None), _signal(), market)
     assert tick.execution is not None
@@ -89,11 +139,14 @@ async def test_entry_flows_through_oms_and_persists(setup_runner) -> None:  # ty
     assert ledger.position(1, "up") is not None
     order = await store.get_order(tick.execution.ack.client_id)
     fills = await store.get_fills(tick.execution.ack.order_id)
-    assert order is not None and order.mode == "paper"
+    assert order is not None
+    assert order.mode == "paper"
     assert len(fills) == 1
 
 
-async def test_settlement_is_net_of_fee_and_persists_equity(setup_runner) -> None:  # type: ignore[no-untyped-def]
+async def test_settlement_is_net_of_fee_and_persists_equity(
+    setup_runner: tuple[PaperRunner, PaperLedger, Store, MarketBook],
+) -> None:
     runner, ledger, store, market = setup_runner
     await runner.on_tick(_round(None), _signal(), market)
     before = ledger.balance
@@ -107,23 +160,39 @@ async def test_settlement_is_net_of_fee_and_persists_equity(setup_runner) -> Non
     assert len(equity) == 1
 
 
-async def test_losing_settlement_reduces_balance(setup_runner) -> None:  # type: ignore[no-untyped-def]
-    runner, ledger, _store, market = setup_runner
+async def test_losing_settlement_reduces_balance(
+    setup_runner: tuple[PaperRunner, PaperLedger, Store, MarketBook],
+) -> None:
+    runner, _ledger, _store, market = setup_runner
     await runner.on_tick(_round(None), _signal(), market)
     result = await runner.settle(_round(Outcome.DOWN))
     assert result.pnl < Decimal("0")
     assert result.balance_after < Decimal("500")
 
 
-async def test_no_signal_produces_no_order(setup_runner) -> None:  # type: ignore[no-untyped-def]
+async def test_no_signal_produces_no_order(
+    setup_runner: tuple[PaperRunner, PaperLedger, Store, MarketBook],
+) -> None:
     runner, _ledger, store, market = setup_runner
-    weak = Signal(1, NOW, Decimal("100001"), Decimal("1"), 30.0, Decimal("0.5"), "UP", Decimal("0.96"), Decimal("-0.46"))
+    weak = Signal(
+        1,
+        NOW,
+        Decimal("100001"),
+        Decimal("1"),
+        30.0,
+        Decimal("0.5"),
+        "UP",
+        Decimal("0.96"),
+        Decimal("-0.46"),
+    )
     tick = await runner.on_tick(_round(None), weak, market)
     assert tick.execution is None
     assert await store.get_order("paper:1:1") is None
 
 
-async def test_unresolved_round_cannot_settle(setup_runner) -> None:  # type: ignore[no-untyped-def]
+async def test_unresolved_round_cannot_settle(
+    setup_runner: tuple[PaperRunner, PaperLedger, Store, MarketBook],
+) -> None:
     runner, _ledger, _store, _market_book = setup_runner
     with pytest.raises(ValueError, match="Gamma"):
         await runner.settle(_round(None))
