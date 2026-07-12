@@ -2,6 +2,10 @@
 
 The detector reads recorded books, measures contiguous valid episodes, and writes
 only optional CSV/text output. It never imports or calls OMS, signing, or order APIs.
+
+Recorded snapshots contain best price plus aggregate side depth, not exact depth at
+the best level. Replay depth and theoretical PnL are therefore explicit upper-bound
+proxies, never executable-profit claims.
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ class ArbDetectorConfig:
 
 @dataclass(frozen=True, slots=True)
 class ArbEpisode:
-    """One contiguous run of valid lock-pair observations."""
+    """One contiguous run of unique valid paired-book states."""
 
     round_no: int
     start_ts: datetime
@@ -60,18 +64,19 @@ class ArbEpisode:
     duration_ms: int
     observations: int
     best_net_edge: Decimal
-    min_depth: Decimal
-    theoretical_pnl: Decimal
+    min_depth_upper_bound: Decimal
+    theoretical_pnl_upper_bound: Decimal
 
 
 @dataclass(frozen=True, slots=True)
 class ArbDetectionReport:
     rounds_processed: int
     ticks_evaluated: int
-    valid_ticks: int
+    unique_book_states: int
+    valid_states: int
     episodes: tuple[ArbEpisode, ...]
     reject_counts: dict[str, int]
-    theoretical_pnl: Decimal
+    theoretical_pnl_upper_bound: Decimal
 
 
 @dataclass(slots=True)
@@ -81,17 +86,24 @@ class _EpisodeBuilder:
     end_ts: datetime
     observations: int
     best_edge: Decimal
-    min_depth: Decimal
-    best_theoretical_pnl: Decimal
+    min_depth_upper_bound: Decimal
+    best_pnl_upper_bound: Decimal
 
-    def add(self, opportunity: ArbOpportunity, max_lock_size: Decimal) -> None:
-        self.end_ts = opportunity.ts  # type: ignore[assignment]
+    def add(
+        self,
+        opportunity: ArbOpportunity,
+        observation_ts: datetime,
+        max_lock_size: Decimal,
+    ) -> None:
+        self.end_ts = observation_ts
         self.observations += 1
         edge = opportunity.net_lock_edge or _ZERO
         self.best_edge = max(self.best_edge, edge)
-        self.min_depth = min(self.min_depth, opportunity.max_lock_size)
+        self.min_depth_upper_bound = min(
+            self.min_depth_upper_bound, opportunity.max_lock_size
+        )
         size = min(opportunity.max_lock_size, max_lock_size)
-        self.best_theoretical_pnl = max(self.best_theoretical_pnl, edge * size)
+        self.best_pnl_upper_bound = max(self.best_pnl_upper_bound, edge * size)
 
     def finish(self) -> ArbEpisode:
         duration = max(0, int((self.end_ts - self.start_ts).total_seconds() * 1000))
@@ -102,23 +114,44 @@ class _EpisodeBuilder:
             duration,
             self.observations,
             self.best_edge,
-            self.min_depth,
-            self.best_theoretical_pnl,
+            self.min_depth_upper_bound,
+            self.best_pnl_upper_bound,
         )
+
+
+def _book_state_key(tick: ReplayTick) -> tuple[object, ...]:
+    """Deduplicate LVCF ticks that repeat an unchanged paired-book state."""
+    up_ask = tick.book_up.asks[0] if tick.book_up.asks else None
+    down_ask = tick.book_down.asks[0] if tick.book_down.asks else None
+    return (
+        tick.book_up.ts,
+        tick.book_down.ts,
+        None if up_ask is None else up_ask.price,
+        None if up_ask is None else up_ask.size,
+        None if down_ask is None else down_ask.price,
+        None if down_ask is None else down_ask.size,
+    )
 
 
 def detect_round_episodes(
     round_no: int,
     ticks: Sequence[ReplayTick],
     config: ArbDetectorConfig,
-) -> tuple[tuple[ArbEpisode, ...], dict[str, int], int, int]:
-    """Evaluate one round and group consecutive valid ticks into episodes."""
+) -> tuple[tuple[ArbEpisode, ...], dict[str, int], int, int, int]:
+    """Group consecutive unique valid paired-book states into episodes."""
     episodes: list[ArbEpisode] = []
     rejects = dict.fromkeys(REJECT_REASONS, 0)
     current: _EpisodeBuilder | None = None
-    valid_ticks = 0
+    valid_states = 0
+    unique_states = 0
+    previous_key: tuple[object, ...] | None = None
 
     for tick in ticks:
+        state_key = _book_state_key(tick)
+        if state_key == previous_key:
+            continue
+        previous_key = state_key
+        unique_states += 1
         opportunity = detect_lock_pair(
             round_no=round_no,
             book_up=tick.book_up,
@@ -130,7 +163,7 @@ def detect_round_episodes(
             max_sum_asks=config.max_sum_asks,
         )
         if opportunity.valid:
-            valid_ticks += 1
+            valid_states += 1
             edge = opportunity.net_lock_edge or _ZERO
             pnl = edge * min(opportunity.max_lock_size, config.max_lock_size)
             if current is None:
@@ -144,7 +177,7 @@ def detect_round_episodes(
                     pnl,
                 )
             else:
-                current.add(opportunity, config.max_lock_size)
+                current.add(opportunity, tick.ts, config.max_lock_size)
         else:
             if opportunity.reject_reason is not None:
                 rejects[opportunity.reject_reason] += 1
@@ -154,7 +187,7 @@ def detect_round_episodes(
 
     if current is not None:
         episodes.append(current.finish())
-    return tuple(episodes), rejects, len(ticks), valid_ticks
+    return tuple(episodes), rejects, len(ticks), unique_states, valid_states
 
 
 async def replay_arb_detection(  # noqa: PLR0913
@@ -169,27 +202,32 @@ async def replay_arb_detection(  # noqa: PLR0913
     """Stream recorded rounds once and return aggregate read-only metrics."""
     all_episodes: list[ArbEpisode] = []
     rejects = dict.fromkeys(REJECT_REASONS, 0)
-    rounds = ticks_total = valid_ticks = 0
+    rounds = ticks_total = unique_states = valid_states = 0
     async for rnd, ticks in load_round_replays(store, since=since, until=until, limit=max_rounds):
         rounds += 1
-        episodes, round_rejects, tick_count, round_valid = detect_round_episodes(
-            rnd.round_no, ticks, config
+        episodes, round_rejects, tick_count, round_unique, round_valid = (
+            detect_round_episodes(rnd.round_no, ticks, config)
         )
         all_episodes.extend(episodes)
         ticks_total += tick_count
-        valid_ticks += round_valid
+        unique_states += round_unique
+        valid_states += round_valid
         for reason, count in round_rejects.items():
             rejects[reason] += count
         if progress_every > 0 and rounds % progress_every == 0:
             sys.stderr.write(
-                f"processed={rounds} ticks={ticks_total} episodes={len(all_episodes)}\n"
+                f"processed={rounds} ticks={ticks_total} unique_states={unique_states} "
+                f"episodes={len(all_episodes)}\n"
             )
             sys.stderr.flush()
-    theoretical = sum((episode.theoretical_pnl for episode in all_episodes), _ZERO)
+    theoretical = sum(
+        (episode.theoretical_pnl_upper_bound for episode in all_episodes), _ZERO
+    )
     return ArbDetectionReport(
         rounds,
         ticks_total,
-        valid_ticks,
+        unique_states,
+        valid_states,
         tuple(all_episodes),
         rejects,
         theoretical,
@@ -211,25 +249,33 @@ def _percentile(values: Sequence[int], q: float) -> float:
 def format_report(report: ArbDetectionReport) -> str:
     durations = [episode.duration_ms for episode in report.episodes]
     edges = [episode.best_net_edge for episode in report.episodes]
-    depths = [episode.min_depth for episode in report.episodes]
+    depths = [episode.min_depth_upper_bound for episode in report.episodes]
     median_edge = sorted(edges)[len(edges) // 2] if edges else _ZERO
     median_depth = sorted(depths)[len(depths) // 2] if depths else _ZERO
     lines = [
         "=== PURE ARBITRAGE DETECTOR (READ-ONLY) ===",
         f"rounds processed : {report.rounds_processed}",
         f"ticks evaluated  : {report.ticks_evaluated}",
-        f"valid ticks      : {report.valid_ticks}",
+        f"unique paired-book states: {report.unique_book_states}",
+        f"valid states     : {report.valid_states}",
         f"opportunity episodes: {len(report.episodes)}",
         f"duration ms p25/median/p75/max: {_percentile(durations, 0.25):.1f}/"
         f"{_percentile(durations, 0.50):.1f}/{_percentile(durations, 0.75):.1f}/"
         f"{max(durations, default=0)}",
         f"median best edge : {median_edge}",
-        f"median min depth : {median_depth}",
-        f"theoretical locked PnL before execution risk: {report.theoretical_pnl}",
-        "reject counts:",
+        f"median aggregate-depth upper bound: {median_depth}",
+        f"theoretical PnL upper bound before two-leg execution risk: "
+        f"{report.theoretical_pnl_upper_bound}",
+        "reject counts (unique states):",
     ]
     lines.extend(f"  {reason}: {report.reject_counts.get(reason, 0)}" for reason in REJECT_REASONS)
-    lines.append("WARNING: theoretical only; two-leg fill risk is not simulated here.")
+    lines.extend(
+        [
+            "WARNING: recorder has aggregate side depth, not best-level depth.",
+            "WARNING: depth and PnL are upper-bound proxies, not executable estimates.",
+            "WARNING: Phase 1 does not simulate atomic two-leg fills.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -246,8 +292,8 @@ def write_csv(report: ArbDetectionReport, path: Path) -> None:
                     episode.duration_ms,
                     episode.observations,
                     str(episode.best_net_edge),
-                    str(episode.min_depth),
-                    str(episode.theoretical_pnl),
+                    str(episode.min_depth_upper_bound),
+                    str(episode.theoretical_pnl_upper_bound),
                 )
             )
 

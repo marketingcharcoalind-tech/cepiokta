@@ -6,6 +6,7 @@ This module is domain-only: no database, network, OMS, signing, or secrets.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from btcbot.domain.fees import FeeModel
@@ -31,7 +32,7 @@ class ArbOpportunity:
     """Evaluation of one synchronized UP/DOWN book pair."""
 
     round_no: int
-    ts: object
+    ts: datetime
     token_up: str
     token_down: str
     ask_up: Decimal | None
