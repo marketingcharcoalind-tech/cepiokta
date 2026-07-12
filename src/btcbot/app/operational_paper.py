@@ -133,7 +133,7 @@ class OperationalPaperLoop:
         meta = await self._gamma.discover_active_round()
         return await self.run_round(meta, max_ticks=max_ticks)
 
-    async def run_round(  # noqa: PLR0915
+    async def run_round(
         self, meta: RoundMeta, *, max_ticks: int | None = None
     ) -> OperationalRoundReport:
         now = self._clock.now()
