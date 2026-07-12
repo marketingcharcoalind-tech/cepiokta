@@ -8,13 +8,22 @@ and ``settle`` for Gamma-labelled round settlement. No live order API exists her
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from btcbot.adapters.clock import Clock
 from btcbot.data.store import OrderRow, Store
 from btcbot.domain.fees import FeeModel
 from btcbot.domain.models import OrderRequest, Outcome, Position, Round, RoundResult, Signal
-from btcbot.domain.strategy import EnterOrder, Exit, Hedge, MarketBook, NoOp, Strategy
+from btcbot.domain.strategy import (
+    Decision,
+    EnterOrder,
+    Exit,
+    Hedge,
+    MarketBook,
+    NoOp,
+    Strategy,
+)
 from btcbot.exec.oms import PaperExecution, PaperOMS
 from btcbot.exec.sizing import SizingLimits, size
 from btcbot.risk.manager import RiskAction, RiskOrder, RiskState
@@ -71,10 +80,10 @@ class PaperLedger:
             for (position_round, _), position in self._positions.items()
             if position_round == round_no and position.size > _ZERO
         ]
-        if len(positions) != 1:
+        if not positions:
             return None
-        position = positions[0]
-        return Position(round_no, position.token_id, position.size, position.average_price)
+        primary = max(positions, key=lambda item: item.cost)
+        return Position(round_no, primary.token_id, primary.size, primary.average_price)
 
     def open_exposure(self) -> Decimal:
         return sum((position.cost for position in self._positions.values()), _ZERO)
@@ -99,7 +108,7 @@ class PaperLedger:
                     raise RuntimeError("paper fill exceeds available balance")
                 self.balance -= debit
                 position.size += fill.size
-                position.cost += fill.price * fill.size + fee
+                position.cost += debit
             else:
                 if fill.size > position.size:
                     raise RuntimeError("paper sell exceeds position")
@@ -121,20 +130,23 @@ class PaperLedger:
             (position.size for position in positions if position.outcome is rnd.resolved_outcome),
             _ZERO,
         )
-        self.balance += payout
         total_size = sum((position.size for position in positions), _ZERO)
         total_cost = sum((position.cost for position in positions), _ZERO)
         primary = max(positions, key=lambda item: item.cost) if positions else None
+        primary_outcome = primary.outcome.value if primary is not None else "NONE"
+        primary_average = primary.average_price if primary is not None else _ZERO
+        primary_cost = primary.cost if primary is not None else _ZERO
+        self.balance += payout
         for position in positions:
             position.size = _ZERO
             position.cost = _ZERO
         pnl = self.balance - self._round_start[rnd.round_no]
         return RoundResult(
             round_no=rnd.round_no,
-            side_taken=primary.outcome.value if primary is not None else "NONE",
-            entry_price=primary.average_price if primary is not None else _ZERO,
+            side_taken=primary_outcome,
+            entry_price=primary_average,
             size=total_size,
-            hedge_cost=max(_ZERO, total_cost - (primary.cost if primary is not None else _ZERO)),
+            hedge_cost=max(_ZERO, total_cost - primary_cost),
             settled=payout,
             pnl=pnl,
             balance_after=self.balance,
@@ -161,7 +173,7 @@ class PaperRunner:
         self._store = store
         self._clock = clock
         self._sequence = 0
-        self._recent_orders: list = []
+        self._recent_orders: list[datetime] = []
         self._consecutive_losses = 0
         self._day_start_balance = ledger.balance
 
@@ -201,11 +213,19 @@ class PaperRunner:
         await self._store.insert_equity_point(self._clock.now(), result.balance_after, "paper")
         return result
 
-    def _build_order(self, rnd, signal, books, position, decision):  # type: ignore[no-untyped-def]
+    def _build_order(
+        self,
+        rnd: Round,
+        signal: Signal,
+        books: MarketBook,
+        position: Position | None,
+        decision: Decision,
+    ) -> tuple[OrderRequest | None, RiskAction, Outcome]:
         self._sequence += 1
         client_id = f"paper:{rnd.round_no}:{self._sequence}"
         if isinstance(decision, EnterOrder):
-            depth = sum((level.size for level in books.for_outcome(Outcome(decision.outcome)).asks), _ZERO)
+            order_book = books.for_outcome(Outcome(decision.outcome))
+            depth = sum((level.size for level in order_book.asks), _ZERO)
             order_size = size(signal, self._ledger.balance, depth, self._limits)
             action = RiskAction.ENTRY
         elif isinstance(decision, Hedge):
@@ -216,8 +236,9 @@ class PaperRunner:
             action = RiskAction.EXIT
         else:
             return None, RiskAction.ENTRY, Outcome.UP
+        outcome = Outcome(decision.outcome)
         if order_size <= _ZERO:
-            return None, action, Outcome(decision.outcome)
+            return None, action, outcome
         request = OrderRequest(
             client_id=client_id,
             token_id=decision.token_id,
@@ -226,7 +247,7 @@ class PaperRunner:
             size=order_size,
             order_type=decision.order_type,
         )
-        return request, action, Outcome(decision.outcome)
+        return request, action, outcome
 
     async def _persist(
         self, round_no: int, request: OrderRequest, execution: PaperExecution
