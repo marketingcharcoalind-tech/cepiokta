@@ -9,6 +9,7 @@ No command/control handler exists in T.1.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -133,10 +134,8 @@ class TelegramNotifier:
             await self._queue.join()
         if self._task is not None:
             self._task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         await self._transport.close()
 
@@ -170,7 +169,7 @@ class TelegramNotifier:
                 await self._transport.send(message)
                 self.sent += 1
                 return
-            except Exception as exc:  # noqa: BLE001 - auxiliary boundary must contain failures
+            except Exception as exc:
                 if attempt >= self._retry_attempts:
                     self.failed += 1
                     _LOG.warning(
