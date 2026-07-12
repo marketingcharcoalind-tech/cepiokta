@@ -136,7 +136,7 @@ async def main_async(argv: list[str] | None = None) -> int:
         max_start_lag_seconds=args.max_start_lag_seconds,
     )
     round_no, ticks, settled, reason = result
-    print(
+    print(  # noqa: T201 - intentional CLI smoke summary
         f"SMOKE round={round_no} ticks={ticks} settled={settled} "
         f"reason={reason or 'none'} execution=disabled"
     )

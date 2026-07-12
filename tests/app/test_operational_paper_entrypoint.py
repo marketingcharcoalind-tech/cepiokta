@@ -45,5 +45,5 @@ def test_smoke_safety_rejects_non_paper_database() -> None:
     settings = _safe_settings().model_copy(
         update={"db_url": "sqlite+aiosqlite:///./btcbot.db"}
     )
-    with pytest.raises(RuntimeError, match="paper.db"):
+    with pytest.raises(RuntimeError, match=r"paper\.db"):
         _assert_smoke_safe(settings)
