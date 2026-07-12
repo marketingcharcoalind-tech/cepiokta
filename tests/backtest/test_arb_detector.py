@@ -82,7 +82,5 @@ def test_invalid_state_splits_episodes():
 
 
 def test_theoretical_pnl_is_explicit_upper_bound():
-    episodes, _, _, _, _ = detect_round_episodes(
-        7, [_tick(0, "0.45", "0.45")], _config()
-    )
+    episodes, _, _, _, _ = detect_round_episodes(7, [_tick(0, "0.45", "0.45")], _config())
     assert episodes[0].theoretical_pnl_upper_bound == Decimal("1.00")

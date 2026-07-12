@@ -99,9 +99,7 @@ class _EpisodeBuilder:
         self.observations += 1
         edge = opportunity.net_lock_edge or _ZERO
         self.best_edge = max(self.best_edge, edge)
-        self.min_depth_upper_bound = min(
-            self.min_depth_upper_bound, opportunity.max_lock_size
-        )
+        self.min_depth_upper_bound = min(self.min_depth_upper_bound, opportunity.max_lock_size)
         size = min(opportunity.max_lock_size, max_lock_size)
         self.best_pnl_upper_bound = max(self.best_pnl_upper_bound, edge * size)
 
@@ -205,8 +203,8 @@ async def replay_arb_detection(  # noqa: PLR0913
     rounds = ticks_total = unique_states = valid_states = 0
     async for rnd, ticks in load_round_replays(store, since=since, until=until, limit=max_rounds):
         rounds += 1
-        episodes, round_rejects, tick_count, round_unique, round_valid = (
-            detect_round_episodes(rnd.round_no, ticks, config)
+        episodes, round_rejects, tick_count, round_unique, round_valid = detect_round_episodes(
+            rnd.round_no, ticks, config
         )
         all_episodes.extend(episodes)
         ticks_total += tick_count
@@ -220,9 +218,7 @@ async def replay_arb_detection(  # noqa: PLR0913
                 f"episodes={len(all_episodes)}\n"
             )
             sys.stderr.flush()
-    theoretical = sum(
-        (episode.theoretical_pnl_upper_bound for episode in all_episodes), _ZERO
-    )
+    theoretical = sum((episode.theoretical_pnl_upper_bound for episode in all_episodes), _ZERO)
     return ArbDetectionReport(
         rounds,
         ticks_total,
