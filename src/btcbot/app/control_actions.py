@@ -8,15 +8,17 @@ change MODE or risk limits. Actions reuse the same RiskManager as paper core.
 from __future__ import annotations
 
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Callable, Protocol
+from typing import Protocol
 
 from btcbot.adapters.clock import Clock
 from btcbot.risk.manager import RiskManager
 
 _CONFIRM_TTL = timedelta(seconds=60)
+_CALLBACK_PARTS = 3
 
 
 class ControlAction(StrEnum):
@@ -55,7 +57,7 @@ class _PendingAction:
 class TelegramActionController:
     """Two-step action controller with whitelist, expiry, anti-replay, and audit."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         risk: RiskManager,
@@ -96,7 +98,12 @@ class TelegramActionController:
         if chat_id not in self._allowed:
             return None
         parts = callback.split(":", 2)
-        if len(parts) != 3 or parts[0] != "control" or parts[1] not in {"confirm", "cancel"}:
+        valid = (
+            len(parts) == _CALLBACK_PARTS
+            and parts[0] == "control"
+            and parts[1] in {"confirm", "cancel"}
+        )
+        if not valid:
             return ActionReply("Invalid control callback.")
         operation, token = parts[1], parts[2]
         pending = self._pending.pop(token, None)
