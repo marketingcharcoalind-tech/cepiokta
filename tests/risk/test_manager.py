@@ -83,17 +83,13 @@ def test_allows_order_inside_every_limit() -> None:
 def test_vetoes_round_notional_above_limit_but_allows_exact_limit() -> None:
     manager = _manager()
     exact = manager.check(_order(price="1", size="1"), _state(round_notional=Decimal("4")))
-    above = manager.check(
-        _order(price="1", size="1.01"), _state(round_notional=Decimal("4"))
-    )
+    above = manager.check(_order(price="1", size="1.01"), _state(round_notional=Decimal("4")))
     assert isinstance(exact, Allow)
     assert _reason(above) == "max_notional_round"
 
 
 def test_vetoes_projected_open_exposure_above_limit() -> None:
-    decision = _manager().check(
-        _order(price="1", size="2"), _state(open_exposure=Decimal("9"))
-    )
+    decision = _manager().check(_order(price="1", size="2"), _state(open_exposure=Decimal("9")))
     assert _reason(decision) == "max_open_exposure"
 
 
@@ -141,9 +137,7 @@ def test_order_exactly_sixty_seconds_old_is_outside_rate_window() -> None:
         NOW - timedelta(seconds=30),
         NOW - timedelta(seconds=1),
     )
-    assert isinstance(
-        _manager().check(_order(), _state(recent_order_timestamps=timestamps)), Allow
-    )
+    assert isinstance(_manager().check(_order(), _state(recent_order_timestamps=timestamps)), Allow)
 
 
 def test_pause_blocks_entry_but_allows_exit() -> None:
@@ -204,21 +198,26 @@ def test_manual_kill_blocks_all_actions() -> None:
 
 def test_invalid_order_and_state_fail_closed() -> None:
     assert _reason(_manager().check(_order(size="0"), _state())) == "invalid_order_value"
-    assert _reason(
-        _manager().check(_order(), _state(open_exposure=Decimal("-1")))
-    ) == "invalid_risk_state"
+    assert (
+        _reason(_manager().check(_order(), _state(open_exposure=Decimal("-1"))))
+        == "invalid_risk_state"
+    )
 
 
 def test_naive_or_future_rate_limit_timestamp_fails_closed() -> None:
     naive = datetime(2026, 7, 12, 16, 29)  # noqa: DTZ001
-    assert _reason(
-        _manager().check(_order(), _state(recent_order_timestamps=(naive,)))
-    ) == "invalid_order_timestamp"
-    assert _reason(
-        _manager().check(
-            _order(), _state(recent_order_timestamps=(NOW + timedelta(seconds=1),))
+    assert (
+        _reason(_manager().check(_order(), _state(recent_order_timestamps=(naive,))))
+        == "invalid_order_timestamp"
+    )
+    assert (
+        _reason(
+            _manager().check(
+                _order(), _state(recent_order_timestamps=(NOW + timedelta(seconds=1),))
+            )
         )
-    ) == "future_order_timestamp"
+        == "future_order_timestamp"
+    )
 
 
 def test_naive_clock_is_rejected() -> None:
