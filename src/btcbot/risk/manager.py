@@ -231,9 +231,7 @@ class RiskManager:
         return now.astimezone(UTC)
 
     @staticmethod
-    def _validate(  # noqa: PLR0911
-        order: RiskOrder, state: RiskState, now: datetime
-    ) -> str | None:
+    def _validate(order: RiskOrder, state: RiskState, now: datetime) -> str | None:  # noqa: PLR0911
         request = order.request
         if order.round_no < 0:
             return "invalid_round"
@@ -262,9 +260,7 @@ class RiskManager:
         if state.balance < self._limits.min_balance:
             return "min_balance"
         daily_loss = max(_ZERO, state.day_start_balance - state.balance)
-        daily_loss_limit = (
-            state.day_start_balance * self._limits.max_daily_loss_pct / _HUNDRED
-        )
+        daily_loss_limit = state.day_start_balance * self._limits.max_daily_loss_pct / _HUNDRED
         if daily_loss >= daily_loss_limit:
             return "max_daily_loss"
         if state.consecutive_losses >= self._limits.max_consec_losses:
