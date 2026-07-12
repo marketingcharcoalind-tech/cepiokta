@@ -9,9 +9,9 @@ window start price.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import timedelta
-from decimal import Decimal
 from typing import Protocol
 
 from btcbot.adapters.chainlink import PriceUnavailableError
@@ -33,7 +33,7 @@ class MarketDiscovery(Protocol):
 
 
 class MarketStream(Protocol):
-    def stream_market(self, token_ids: list[str]): ...
+    def stream_market(self, token_ids: list[str]) -> AsyncIterator[OrderBook]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +125,7 @@ class OperationalPaperLoop:
         meta = await self._gamma.discover_active_round()
         return await self.run_round(meta, max_ticks=max_ticks)
 
-    async def run_round(
+    async def run_round(  # noqa: PLR0915
         self, meta: RoundMeta, *, max_ticks: int | None = None
     ) -> OperationalRoundReport:
         now = self._clock.now()
@@ -185,10 +185,8 @@ class OperationalPaperLoop:
                 ticks += 1
         finally:
             consumer.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await consumer
-            except asyncio.CancelledError:
-                pass
 
         outcome = await self._poll_resolution(meta.condition_id)
         if outcome is None:

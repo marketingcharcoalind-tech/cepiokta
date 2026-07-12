@@ -1,8 +1,8 @@
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import AsyncIterator
 
 from btcbot.adapters.clock import SimClock
 from btcbot.app.operational_paper import (
