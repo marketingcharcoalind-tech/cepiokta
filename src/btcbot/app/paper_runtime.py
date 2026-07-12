@@ -167,7 +167,7 @@ def _resolve_delta_threshold(settings: Settings) -> Decimal:
     return Decimal(raw)
 
 
-def build_operational_paper_runtime(
+def build_operational_paper_runtime(  # noqa: PLR0913
     *,
     settings: Settings,
     store: Store,
