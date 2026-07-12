@@ -93,9 +93,7 @@ def _sizing() -> SizingLimits:
 
 
 def _risk(clock: SimClock) -> RiskManager:
-    limits = RiskLimits(
-        Decimal("5"), Decimal("10"), Decimal("5"), 5, Decimal("50"), 30
-    )
+    limits = RiskLimits(Decimal("5"), Decimal("10"), Decimal("5"), 5, Decimal("50"), 30)
     return RiskManager(limits, clock)
 
 
