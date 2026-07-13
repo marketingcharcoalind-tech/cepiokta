@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
 from btcbot.adapters.chainlink import PriceUnavailableError
 from btcbot.adapters.clock import Clock
+from btcbot.adapters.gamma import GammaError
 from btcbot.app.paper_runtime import OperationalPaperRuntime
 from btcbot.app.reconcile import (
     PaperOrderRecord,
@@ -40,6 +42,8 @@ from btcbot.domain.signal import SignalEngine
 from btcbot.domain.strategy import MarketBook
 from btcbot.risk.manager import CircuitReason
 
+logger = logging.getLogger(__name__)
+
 
 class MarketDiscovery(Protocol):
     async def discover_active_round(self) -> RoundMeta: ...
@@ -56,7 +60,8 @@ class OperationalLoopConfig:
     tick_seconds: float = 0.25
     max_start_lag_seconds: float = 2.0
     resolution_poll_seconds: float = 2.0
-    max_resolution_attempts: int = 90
+    max_resolution_attempts: int = 450  # 15 min at 2s per attempt
+    resolution_backoff_seconds: float = 0.5  # exponential backoff base
     paper_execution_enabled: bool = False
 
     def __post_init__(self) -> None:
@@ -64,6 +69,8 @@ class OperationalLoopConfig:
             raise ValueError("invalid operational loop timing")
         if self.resolution_poll_seconds <= 0 or self.max_resolution_attempts <= 0:
             raise ValueError("invalid resolution polling timing")
+        if self.resolution_backoff_seconds < 0:
+            raise ValueError("invalid resolution backoff timing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +220,7 @@ class OperationalPaperLoop:
         if outcome is None:
             await self._runtime.report_error(
                 kind="Gamma resolution timeout",
-                detail=f"round {round_no} unresolved",
+                detail=f"round {round_no} unresolved after {self._config.max_resolution_attempts} attempts",
                 remediation=("check Gamma API; keep entry halted until resolution is known"),
             )
             return OperationalRoundReport(round_no, ticks, False, "resolution_timeout")
@@ -324,9 +331,51 @@ class OperationalPaperLoop:
             )
 
     async def _poll_resolution(self, condition_id: str) -> Outcome | None:
-        for _ in range(self._config.max_resolution_attempts):
-            outcome = await self._gamma.get_resolution(condition_id)
-            if outcome is not None:
-                return outcome
+        """Poll Gamma for resolution with exponential backoff and transient error retry.
+        
+        Never invents outcome from BTC delta or Chainlink. Gamma is ground truth.
+        Transient errors (429, 5xx, transport) are retried with backoff.
+        Fatal errors (4xx auth, schema) propagate as failure.
+        """
+        backoff_base = self._config.resolution_backoff_seconds
+        max_backoff = 30.0  # cap backoff to 30s
+        
+        for attempt in range(self._config.max_resolution_attempts):
+            try:
+                outcome = await self._gamma.get_resolution(condition_id)
+                if outcome is not None:
+                    logger.debug(
+                        "gamma resolution resolved",
+                        extra={"attempt": attempt, "outcome": outcome.name},
+                    )
+                    return outcome
+            except GammaError as exc:
+                logger.warning(
+                    "transient gamma error during resolution poll",
+                    extra={"attempt": attempt, "error": type(exc).__name__, "detail": str(exc)},
+                )
+                # Transient error: retry with backoff
+                backoff = min(backoff_base * (2 ** attempt), max_backoff)
+                await asyncio.sleep(backoff)
+                continue
+            except Exception as exc:
+                # Fatal error (auth, schema, etc.)
+                logger.error(
+                    "fatal error during resolution poll",
+                    extra={"attempt": attempt, "error": type(exc).__name__, "detail": str(exc)},
+                )
+                raise
+            
+            # outcome is None (not yet resolved) — wait and retry
             await asyncio.sleep(self._config.resolution_poll_seconds)
+        
+        logger.warning(
+            "gamma resolution timeout",
+            extra={
+                "attempts": self._config.max_resolution_attempts,
+                "total_seconds": (
+                    self._config.max_resolution_attempts * self._config.resolution_poll_seconds
+                ),
+            },
+        )
         return None
