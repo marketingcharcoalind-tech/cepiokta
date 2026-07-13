@@ -177,7 +177,9 @@ class OperationalPaperLoop:
 
         rnd = round_from_meta(meta, round_no=round_no, start_price=start_tick.price)
         await self._store.upsert_round(rnd)
-        consumer = asyncio.create_task(self._consume_books(meta), name=f"paper-books-{round_no}")
+        consumer = asyncio.create_task(
+            self._consume_books(meta), name=f"paper-books-{round_no}"
+        )
         client_ids: list[str] = []
         ticks = 0
         try:
@@ -218,10 +220,13 @@ class OperationalPaperLoop:
 
         outcome = await self._poll_resolution(meta.condition_id)
         if outcome is None:
+            max_attempts = self._config.max_resolution_attempts
             await self._runtime.report_error(
                 kind="Gamma resolution timeout",
-                detail=f"round {round_no} unresolved after {self._config.max_resolution_attempts} attempts",
-                remediation=("check Gamma API; keep entry halted until resolution is known"),
+                detail=f"round {round_no} unresolved after {max_attempts} attempts",
+                remediation=(
+                    "check Gamma API; keep entry halted until resolution is known"
+                ),
             )
             return OperationalRoundReport(round_no, ticks, False, "resolution_timeout")
 
@@ -317,7 +322,9 @@ class OperationalPaperLoop:
     async def _consume_books(self, meta: RoundMeta) -> None:
         self._runtime.set_wss_status("reconnecting")
         try:
-            async for book in self._stream.stream_market([meta.token_id_up, meta.token_id_down]):
+            async for book in self._stream.stream_market(
+                [meta.token_id_up, meta.token_id_down]
+            ):
                 self._books.update(book)
                 self._runtime.set_wss_status("connected")
         except asyncio.CancelledError:
@@ -332,14 +339,14 @@ class OperationalPaperLoop:
 
     async def _poll_resolution(self, condition_id: str) -> Outcome | None:
         """Poll Gamma for resolution with exponential backoff and transient error retry.
-        
+
         Never invents outcome from BTC delta or Chainlink. Gamma is ground truth.
         Transient errors (429, 5xx, transport) are retried with backoff.
         Fatal errors (4xx auth, schema) propagate as failure.
         """
         backoff_base = self._config.resolution_backoff_seconds
         max_backoff = 30.0  # cap backoff to 30s
-        
+
         for attempt in range(self._config.max_resolution_attempts):
             try:
                 outcome = await self._gamma.get_resolution(condition_id)
@@ -352,29 +359,38 @@ class OperationalPaperLoop:
             except GammaError as exc:
                 logger.warning(
                     "transient gamma error during resolution poll",
-                    extra={"attempt": attempt, "error": type(exc).__name__, "detail": str(exc)},
+                    extra={
+                        "attempt": attempt,
+                        "error": type(exc).__name__,
+                        "detail": str(exc),
+                    },
                 )
                 # Transient error: retry with backoff
-                backoff = min(backoff_base * (2 ** attempt), max_backoff)
+                backoff = min(backoff_base * (2**attempt), max_backoff)
                 await asyncio.sleep(backoff)
                 continue
             except Exception as exc:
                 # Fatal error (auth, schema, etc.)
                 logger.error(
                     "fatal error during resolution poll",
-                    extra={"attempt": attempt, "error": type(exc).__name__, "detail": str(exc)},
+                    extra={
+                        "attempt": attempt,
+                        "error": type(exc).__name__,
+                        "detail": str(exc),
+                    },
                 )
                 raise
-            
+
             # outcome is None (not yet resolved) — wait and retry
             await asyncio.sleep(self._config.resolution_poll_seconds)
-        
+
         logger.warning(
             "gamma resolution timeout",
             extra={
                 "attempts": self._config.max_resolution_attempts,
                 "total_seconds": (
-                    self._config.max_resolution_attempts * self._config.resolution_poll_seconds
+                    self._config.max_resolution_attempts
+                    * self._config.resolution_poll_seconds
                 ),
             },
         )
